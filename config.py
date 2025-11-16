@@ -9,8 +9,11 @@ DATAGATE_USERNAME = "emartinez"
 DATAGATE_PASSWORD = "letmein2Umeow!!!"
 
 # Logging configuration
-LOGS_DIR = "../../AILH_LOGS"
-SENSOR_DATA = "../../DATA_SENSORS"
+LOGS_DIR = "/DEVELOPMENT/ROOT_AILH/AILH_LOGS"
+AILH_CACHE = "/DEVELOPMENT/ROOT_AILH/AILH_CACHE"
+AILH_TMP = "/DEVELOPMENT/ROOT_AILH/AILH_TMP"
+DATA_SENSORS = "/DEVELOPMENT/ROOT_AILH/DATA_SENSORS"
+DATA_STORE = "/DEVELOPMENT/ROOT_AILH/DATA_STORE"
 
 # Output log file
 LOG_FILE = os.path.join(LOGS_DIR, "all.log")
@@ -20,8 +23,10 @@ LAST_TIMESTAMP_FILE = os.path.join(LOGS_DIR, "last_run.json")
 
 # Ensure the log directory exists at import time
 os.makedirs(LOGS_DIR, exist_ok=True)
-os.makedirs(SENSOR_DATA, exist_ok=True)
-
+os.makedirs(AILH_CACHE, exist_ok=True)
+os.makedirs(AILH_TMP, exist_ok=True)
+os.makedirs(DATA_SENSORS, exist_ok=True)
+os.makedirs(DATA_STORE, exist_ok=True)
 
 ##### Constants for the AMSYS AILHv2 Leak Detection System #####
 
