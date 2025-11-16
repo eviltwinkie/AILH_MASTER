@@ -2,7 +2,7 @@
 """
 gpu_diagnostic_suite.py
 
-Unified GPU diagnostics and stress test suite.
+Unified GPU diagnostics, stress tests, and GEMM benchmarks.
 
 Features:
 - System & environment diagnostics (NVIDIA driver, CPU info, CUDA PATH)
@@ -15,7 +15,18 @@ Features:
 - TF stress Conv2D batch clamped to avoid int32 launch overflow
 - TF stress matmul timings made accurate with explicit synchronization
 - PTXAS diagnostics
-- Simple resource suggestion
+- Resource suggestion (parallelism hints)
+- GEMM benchmarks:
+    * NumPy CPU fp32 (also used as CPU baseline for fp16)
+    * PyTorch GPU fp32 + fp16
+    * NVMath GPU fp32 + fp16 (nvmath.linalg.advanced.matmul)
+  Run fp32 and fp16 back-to-back and produce combined TFLOP/s comparisons.
+
+CLI:
+  python gpu_diagnostic_suite.py
+  python gpu_diagnostic_suite.py --gemm-size 12288 --gemm-iters 10 --gemm-warmup 3
+  python gpu_diagnostic_suite.py --no-gemm
+  python gpu_diagnostic_suite.py --no-numpy-gemm
 """
 
 import os
@@ -25,7 +36,11 @@ import textwrap
 import subprocess
 import shutil
 import platform
+import math
+import argparse
 from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 # -----------------------------------------------------------------------------
 # Environment: must be set BEFORE TensorFlow import to quiet logs & disable oneDNN
@@ -51,6 +66,13 @@ try:
     import tensorflow as tf
 except ImportError:
     tf = None
+
+try:
+    import nvmath
+    from nvmath.linalg.advanced import matmul as nvm_matmul
+except ImportError:
+    nvmath = None
+    nvm_matmul = None
 
 # After importing TF, optionally enable memory growth to avoid grabbing all VRAM at once.
 if tf is not None:
@@ -106,6 +128,11 @@ CC_CUDA_TF_RECOMMEND = {
 # Base stress iterations (we use shapes adapted to GPU) — per your request
 STRESS_ITERS = 10
 
+# GEMM defaults (for NVMath / PyTorch / NumPy benchmarks)
+GEMM_SIZE_DEFAULT = 12288
+GEMM_ITERS_DEFAULT = 10
+GEMM_WARMUP_DEFAULT = 3
+
 # =============================================================================
 # UTILS
 # =============================================================================
@@ -129,6 +156,20 @@ def run_cmd(cmd: List[str]) -> Optional[str]:
         )
     except Exception:
         return None
+
+
+def human_tflops(flops_per_second: float) -> str:
+    """Format FLOPs/s into TFLOP/s with 2 decimals."""
+    return f"{flops_per_second / 1e12:0.2f} TFLOP/s"
+
+
+def compute_gemm_flops(n: int, m: int, k: int) -> float:
+    """
+    FLOP count for GEMM: C[m, n] = A[m, k] @ B[k, n]
+    ~ 2 * m * n * k (multiply + add)
+    """
+    return 2.0 * float(m) * float(n) * float(k)
+
 
 # =============================================================================
 # SYSTEM / DRIVER / CPU / CUDA PATH
@@ -169,6 +210,7 @@ def print_cuda_path() -> None:
             found = True
     if not found:
         print("No CUDA directories found in PATH.")
+
 
 # =============================================================================
 # GPU CAPABILITIES / INVENTORY
@@ -242,7 +284,6 @@ def print_gpu_capabilities() -> List[Dict[str, Any]]:
                 "clocks_mem_mhz": to_int(data["clocks.mem"]),
                 "temperature_c": to_int(data["temperature.gpu"]),
                 "pstate": data["pstate"],
-                # preserve as "pci_bus_id" in our dict, but source key is "pci.bus_id"
                 "pci_bus_id": data["pci.bus_id"],
                 "driver_version": data["driver_version"],
                 "display_active": data["display_active"],
@@ -307,6 +348,7 @@ def print_gpu_capabilities() -> List[Dict[str, Any]]:
 
     return gpu_inventory
 
+
 # =============================================================================
 # PTXAS TESTS
 # =============================================================================
@@ -342,6 +384,7 @@ def test_ptxas() -> None:
         t1 = time.time()
         print("❌ ptxas disappeared from PATH unexpectedly.")
         print(f"Time until failure: {(t1 - t0)*1000:.2f} ms")
+
 
 # =============================================================================
 # TF INFO / GPU ENUM / CC ANALYSIS
@@ -507,10 +550,14 @@ def analyze_gpu(gpus) -> None:
 
                         sudo apt update
                         sudo apt install cudnn torch
+                        
+                        pip install nvmath-python tensorrt
+
                     """
                 ).rstrip())
         else:
             print("No recommendation entry for this GPU class.")
+
 
 # =============================================================================
 # ADAPTIVE STRESS SHAPES (MEDIUM-STRESS PROFILE)
@@ -559,6 +606,7 @@ def derive_stress_shapes(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         mm_size = 12288
 
     if cc >= 12.0 and free_mib >= 20000:
+        # Blackwell-class with plenty of VRAM; current profile is "medium" already.
         pass
 
     return {
@@ -590,6 +638,7 @@ def clamp_tf_conv_batch_for_launch_limit(
     work_elems = clamped * per_batch_elems
     frac = float(work_elems) / float(safety_limit) if safety_limit > 0 else 0.0
     return clamped, work_elems, frac
+
 
 # =============================================================================
 # TF / TORCH TEST SUITES
@@ -888,7 +937,6 @@ def run_tensorflow_suite(gpus, gpu_info: Optional[Dict[str, Any]]) -> Dict[str, 
 
     return results
 
-# ---------------------------- PyTorch Suite -----------------------------------
 
 def run_pytorch_suite(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     hr("PyTorch Diagnostics + Stress Suite")
@@ -1116,6 +1164,288 @@ def run_pytorch_suite(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     return results
 
+
+# =============================================================================
+# NVMath / GEMM BENCHMARK SUITE (NumPy, PyTorch, NVMath; fp32 + fp16)
+# =============================================================================
+
+def bench_numpy_gemm(n: int, dtype: str, iters: int, warmup: int) -> float:
+    """
+    CPU baseline using NumPy (BLAS).
+
+    - For dtype == "fp32": true fp32.
+    - For dtype == "fp16": we UPCAST to fp32 for compute, and label accordingly.
+      This avoids extremely slow or poorly optimized CPU fp16 paths while still
+      giving you a rough CPU baseline for the same problem size.
+    """
+    if dtype == "fp32":
+        np_dtype = np.float32
+        label = "fp32"
+    elif dtype == "fp16":
+        np_dtype = np.float32
+        label = "fp32 (CPU baseline for fp16)"
+    else:
+        raise ValueError(f"Unsupported dtype for NumPy: {dtype}")
+
+    print(f"\n[NumPy] GEMM benchmark (CPU) — size={n}x{n}, dtype={label}, "
+          f"iters={iters}, warmup={warmup}")
+
+    A = np.random.randn(n, n).astype(np_dtype)
+    B = np.random.randn(n, n).astype(np_dtype)
+
+    # Warmup
+    for _ in range(warmup):
+        C = A @ B
+
+    flops_per_iter = compute_gemm_flops(n, n, n)
+
+    t0 = time.time()
+    for _ in range(iters):
+        C = A @ B
+    t1 = time.time()
+
+    elapsed = t1 - t0
+    if elapsed <= 0:
+        return float("nan")
+
+    total_flops = flops_per_iter * iters
+    flops_per_sec = total_flops / elapsed
+
+    print(f"  Total time: {elapsed * 1000.0:0.2f} ms")
+    print(f"  Per-iter time: {elapsed * 1000.0 / iters:0.2f} ms")
+    print(f"  Average rate: {human_tflops(flops_per_sec)}")
+
+    return flops_per_sec
+
+
+def bench_torch_gemm(n: int, dtype: str, iters: int, warmup: int,
+                     device: str = "cuda") -> float:
+    """
+    Benchmark PyTorch GEMM C = A @ B with given size and dtype on CPU or GPU.
+    Returns achieved FLOP/s.
+    """
+    if torch is None:
+        print("[PyTorch] NOT installed; skipping PyTorch GEMM benchmark.")
+        return float("nan")
+
+    if device == "cuda" and not torch.cuda.is_available():
+        print("[PyTorch] CUDA is not available; skipping GPU GEMM benchmark.")
+        return float("nan")
+
+    if dtype == "fp32":
+        torch_dtype = torch.float32
+    elif dtype == "fp16":
+        torch_dtype = torch.float16
+    else:
+        raise ValueError(f"Unsupported dtype for PyTorch: {dtype}")
+
+    dev = torch.device("cuda:0" if device == "cuda" else "cpu")
+
+    print(f"\n[PyTorch] GEMM benchmark on {dev} — size={n}x{n}, "
+          f"dtype={dtype}, iters={iters}, warmup={warmup}")
+
+    A = torch.randn(n, n, device=dev, dtype=torch_dtype)
+    B = torch.randn(n, n, device=dev, dtype=torch_dtype)
+
+    # Warmup
+    for _ in range(warmup):
+        C = A @ B
+        if device == "cuda":
+            torch.cuda.synchronize()
+
+    flops_per_iter = compute_gemm_flops(n, n, n)
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+    t0 = time.time()
+    for _ in range(iters):
+        C = A @ B
+    if device == "cuda":
+        torch.cuda.synchronize()
+    t1 = time.time()
+
+    elapsed = t1 - t0
+    if elapsed <= 0:
+        return float("nan")
+
+    total_flops = flops_per_iter * iters
+    flops_per_sec = total_flops / elapsed
+
+    print(f"  Total time: {elapsed * 1000.0:0.2f} ms")
+    print(f"  Per-iter time: {elapsed * 1000.0 / iters:0.2f} ms")
+    print(f"  Average rate: {human_tflops(flops_per_sec)}")
+
+    return flops_per_sec
+
+
+def bench_nvmath_gemm(n: int, dtype: str, iters: int, warmup: int) -> float:
+    """
+    Benchmark NVMath GEMM using nvmath.linalg.advanced.matmul on GPU.
+
+    We allocate A, B as PyTorch CUDA tensors and call nvm_matmul(A, B)
+    which operates on PyTorch tensors and returns a tensor of the same
+    type/device.
+    """
+    if nvmath is None or nvm_matmul is None:
+        print("[NVMath] nvmath-python not installed; skipping NVMath GEMM benchmark.")
+        return float("nan")
+
+    if torch is None or not torch.cuda.is_available():
+        print("[NVMath] Requires PyTorch with CUDA for this benchmark; skipping.")
+        return float("nan")
+
+    if dtype == "fp32":
+        torch_dtype = torch.float32
+    elif dtype == "fp16":
+        torch_dtype = torch.float16
+    else:
+        raise ValueError(f"Unsupported dtype for NVMath: {dtype}")
+
+    dev = torch.device("cuda:0")
+    print(f"\n[NVMath] GEMM benchmark via nvmath.linalg.advanced.matmul — "
+          f"size={n}x{n}, dtype={dtype}, iters={iters}, warmup={warmup}")
+
+    A = torch.randn(n, n, device=dev, dtype=torch_dtype)
+    B = torch.randn(n, n, device=dev, dtype=torch_dtype)
+
+    # Warmup
+    for _ in range(warmup):
+        C = nvm_matmul(A, B)
+        torch.cuda.synchronize()
+
+    flops_per_iter = compute_gemm_flops(n, n, n)
+
+    torch.cuda.synchronize()
+    t0 = time.time()
+    for _ in range(iters):
+        C = nvm_matmul(A, B)
+    torch.cuda.synchronize()
+    t1 = time.time()
+
+    elapsed = t1 - t0
+    if elapsed <= 0:
+        return float("nan")
+
+    total_flops = flops_per_iter * iters
+    flops_per_sec = total_flops / elapsed
+
+    print(f"  Total time: {elapsed * 1000.0:0.2f} ms")
+    print(f"  Per-iter time: {elapsed * 1000.0 / iters:0.2f} ms")
+    print(f"  Average rate: {human_tflops(flops_per_sec)}")
+
+    return flops_per_sec
+
+
+def run_gemm_suite_for_dtype(
+    n: int,
+    iters: int,
+    warmup: int,
+    dtype: str,
+    use_numpy: bool,
+) -> Dict[str, Any]:
+    """
+    Run NumPy, PyTorch, and NVMath GEMM benchmarks for a single dtype.
+    Returns:
+        {
+            "dtype": "fp32" or "fp16",
+            "numpy": <FLOP/s (float) or NaN>,
+            "torch": <FLOP/s>,
+            "nvmath": <FLOP/s>,
+        }
+    """
+    results = {
+        "dtype": dtype,
+        "numpy": float("nan"),
+        "torch": float("nan"),
+        "nvmath": float("nan"),
+    }
+
+    print("\n" + "=" * 80)
+    print(f"Running {dtype} GEMM benchmarks")
+    print("=" * 80)
+
+    # NumPy CPU baseline
+    if use_numpy:
+        numpy_flops = bench_numpy_gemm(n, dtype, iters=iters, warmup=warmup)
+        results["numpy"] = numpy_flops
+
+    # PyTorch GPU GEMM
+    torch_flops = bench_torch_gemm(n, dtype, iters=iters, warmup=warmup, device="cuda")
+    results["torch"] = torch_flops
+
+    # NVMath GPU GEMM
+    nvm_flops = bench_nvmath_gemm(n, dtype, iters=iters, warmup=warmup)
+    results["nvmath"] = nvm_flops
+
+    print("\n" + "-" * 80)
+    print(f"{dtype} GEMM Summary (TFLOP/s)")
+    print("-" * 80)
+    if not math.isnan(results["numpy"]):
+        print(f"NumPy (CPU):    {human_tflops(results['numpy'])}")
+    else:
+        print("NumPy (CPU):    N/A")
+
+    if not math.isnan(results["torch"]):
+        print(f"PyTorch (GPU):  {human_tflops(results['torch'])}")
+    else:
+        print("PyTorch (GPU):  N/A")
+
+    if not math.isnan(results["nvmath"]):
+        print(f"NVMath (GPU):   {human_tflops(results['nvmath'])}")
+    else:
+        print("NVMath (GPU):   N/A")
+
+    return results
+
+
+def run_gemm_benchmarks(
+    n: int,
+    iters: int,
+    warmup: int,
+    use_numpy: bool,
+) -> None:
+    """
+    Run fp32 and fp16 GEMM suites back-to-back and print combined summary.
+    """
+    hr("GEMM / NVMath Benchmarks (NumPy, PyTorch, NVMath; fp32 + fp16)")
+    print(f"Matrix size: {n} x {n}")
+    print(f"Timed iters: {iters}, Warmup: {warmup}")
+    print(f"NumPy baseline in GEMM: {'enabled' if use_numpy else 'disabled'}")
+
+    fp32_results = run_gemm_suite_for_dtype(n, iters, warmup, dtype="fp32", use_numpy=use_numpy)
+    fp16_results = run_gemm_suite_for_dtype(n, iters, warmup, dtype="fp16", use_numpy=use_numpy)
+
+    print("\n" + "=" * 80)
+    print("Combined GEMM Summary (TFLOP/s)")
+    print("=" * 80)
+    print(f"{'Backend':<12} {'fp32':>12} {'fp16':>12} {'fp16/fp32':>12}")
+    print("-" * 80)
+
+    def row(name: str, key: str):
+        v32 = fp32_results.get(key, float("nan"))
+        v16 = fp16_results.get(key, float("nan"))
+        if not math.isnan(v32):
+            s32 = human_tflops(v32)
+        else:
+            s32 = "N/A"
+        if not math.isnan(v16):
+            s16 = human_tflops(v16)
+        else:
+            s16 = "N/A"
+        if (not math.isnan(v32)) and (not math.isnan(v16)) and v32 > 0:
+            speed = v16 / v32
+            s_speed = f"{speed:0.2f}x"
+        else:
+            s_speed = "N/A"
+        print(f"{name:<12} {s32:>12} {s16:>12} {s_speed:>12}")
+
+    row("NumPy (CPU)", "numpy")
+    row("PyTorch", "torch")
+    row("NVMath", "nvmath")
+
+    print("\nGEMM benchmarks done.")
+
+
 # =============================================================================
 # RESOURCE SUMMARY / MAIN
 # =============================================================================
@@ -1130,6 +1460,44 @@ def print_resources(has_gpu: bool) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="GPU diagnostics + TF/PTXAS + PyTorch + NVMath GEMM benchmarks"
+    )
+    parser.add_argument(
+        "--gemm-size",
+        type=int,
+        default=GEMM_SIZE_DEFAULT,
+        help=f"GEMM size n for n x n matrices in GEMM benchmarks (default: {GEMM_SIZE_DEFAULT})",
+    )
+    parser.add_argument(
+        "--gemm-iters",
+        type=int,
+        default=GEMM_ITERS_DEFAULT,
+        help=f"Timed iterations per backend per dtype in GEMM benchmarks (default: {GEMM_ITERS_DEFAULT})",
+    )
+    parser.add_argument(
+        "--gemm-warmup",
+        type=int,
+        default=GEMM_WARMUP_DEFAULT,
+        help=f"Warmup iterations per backend per dtype in GEMM benchmarks (default: {GEMM_WARMUP_DEFAULT})",
+    )
+    parser.add_argument(
+        "--no-gemm",
+        action="store_true",
+        help="Skip the NVMath/PyTorch/NumPy GEMM benchmarks section.",
+    )
+    parser.add_argument(
+        "--no-numpy-gemm",
+        action="store_true",
+        help="Skip NumPy CPU baseline in GEMM benchmarks.",
+    )
+    args = parser.parse_args()
+
+    gemm_size = args.gemm_size
+    gemm_iters = args.gemm_iters
+    gemm_warmup = args.gemm_warmup
+    use_numpy_gemm = not args.no_numpy_gemm
+
     print_nvidia_driver()
     print_cpu_info()
     print_cuda_path()
@@ -1145,6 +1513,15 @@ def main() -> None:
 
     tf_results = run_tensorflow_suite(gpus, gpu0_info)
     torch_results = run_pytorch_suite(gpu0_info)
+
+    # GEMM benchmarks (NumPy / PyTorch / NVMath)
+    if not args.no_gemm:
+        run_gemm_benchmarks(
+            n=gemm_size,
+            iters=gemm_iters,
+            warmup=gemm_warmup,
+            use_numpy=use_numpy_gemm,
+        )
 
     test_ptxas()
     print_resources(has_gpu)
@@ -1168,6 +1545,9 @@ def main() -> None:
 
     print("\nPTXAS:")
     print("  (see PTXAS Diagnostics section above for details)")
+    if not args.no_gemm:
+        print("\nGEMM Benchmarks:")
+        print("  (see GEMM / NVMath Benchmarks section above for TFLOP/s results)")
     print("\nDone.")
 
 
