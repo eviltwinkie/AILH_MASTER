@@ -77,29 +77,20 @@ class Config:
     MAX_BYTES   = _env_int("SFA_MAX_BYTES", 120000)
     LIMIT       = _env_int("SFA_LIMIT", 0)                    # 0 = no limit
     SHUFFLE     = _env_bool("SFA_SHUFFLE", True)
-    TRIALS      = 8
+    TRIALS      = 1
     # ---- Search spaces (coarse) ----
     THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24])
-    #THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [4])
-    #THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [1])
-    
-    #BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [4096, 8192, 32768, 131072, 524288])
-    #BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [1024, 4096, 8192, 32768, 131072])
-    BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [131072])
-    
+    BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [32768, 65536, 131072])
     METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread", "readinto", "mmap"])
-    #METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread"])
-    FADVISE_COARSE        = _split_env_list    ("SFA_FADVISE",        ["SEQUENTIAL", "WILLNEED", "NONE"])
-    
-    #MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [16, 32, 64, 128, 256, 1024])
-    MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [64, 128, 256, 512, 1024])
-    
-    #FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [256])
-    FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [4096])
+    FADVISE_COARSE        = _split_env_list    ("SFA_FADVISE",        ["SEQUENTIAL", "WILLNEED", "NONE"])   
+    #MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [1, 2, 4, 8, 10, 12, 14, 16, 32, 64, 128, 256, 512, 1024])
+    MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [32, 64, 128])
+    #FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [1, 2, 4, 8, 10, 12, 14, 16, 32, 64, 128, 256, 512, 1024, 4096, 8192, 32768, 131072])
+    FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [1, 2, 4])
 
     # ---- Rounds ----
-    ROUNDS      = _env_int("SFA_ROUNDS", 2)       # warm-cache repeats per combo
-    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", 2)  # optional cold-ish rounds (per-file DONTNEED)
+    ROUNDS      = _env_int("SFA_ROUNDS", 1)       # warm-cache repeats per combo
+    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", False)  # optional cold-ish rounds (per-file DONTNEED)
     TRUE_COLD   = _env_bool("SFA_TRUE_COLD", False)
 
     # ---- Latency recording ----

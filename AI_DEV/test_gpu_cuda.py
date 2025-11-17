@@ -30,6 +30,13 @@ CLI:
 """
 
 import os
+
+# ----------------------------------------------------------------------
+# Environment: must be set BEFORE ANY TensorFlow / Keras import
+# ----------------------------------------------------------------------
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"   # disable oneDNN
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"    # 0=all, 1=INFO, 2=WARNING, 3=ERROR
+
 import sys
 import time
 import textwrap
@@ -42,11 +49,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import keras
 import numpy as np
 
-# -----------------------------------------------------------------------------
-# Environment: must be set BEFORE TensorFlow import to quiet logs & disable oneDNN
-# -----------------------------------------------------------------------------
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")   # hide INFO & WARNING
-os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # disable oneDNN fusions
+
+
 
 # -----------------------------------------------------------------------------
 # Optional dependencies
@@ -73,6 +77,39 @@ try:
 except ImportError:
     nvmath = None
     nvm_matmul = None
+
+# -----------------------------------------------------------------------------
+# Optional dependency: PyCUDA (for TensorRT inference smoke test)
+# -----------------------------------------------------------------------------
+PYCUDA_AVAILABLE = False
+PYCUDA_REASON = "Not attempted"
+
+try:
+    import pycuda.driver as cuda
+    try:
+        import pycuda.autoinit  # initializes CUDA context
+        PYCUDA_AVAILABLE = True
+        PYCUDA_REASON = "Imported successfully"
+    except Exception as e:
+        # pycuda is installed but context init failed
+        PYCUDA_AVAILABLE = False
+        PYCUDA_REASON = f"pycuda.autoinit failed: {repr(e)}"
+        cuda = None
+except Exception as e:
+    # covers ImportError and any other odd import failures
+    PYCUDA_AVAILABLE = False
+    PYCUDA_REASON = f"import pycuda failed: {repr(e)}"
+    cuda = None
+
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
+
+try:
+    import tensorrt as trt
+except ImportError:
+    trt = None
 
 # After importing TF, optionally enable memory growth to avoid grabbing all VRAM at once.
 if tf is not None:
@@ -170,6 +207,268 @@ def compute_gemm_flops(n: int, m: int, k: int) -> float:
     """
     return 2.0 * float(m) * float(n) * float(k)
 
+def _trt_float_dtype():
+    # Older TRT: trt.float32 exists
+    if hasattr(trt, "float32"):
+        return trt.float32 # type: ignore
+    # Newer TRT: only DataType.FLOAT exists
+    if hasattr(trt, "DataType"):
+        return trt.DataType.FLOAT # type: ignore
+    # Fallback (very unlikely)
+    raise RuntimeError("Could not determine TensorRT float32 dtype")
+
+# =============================================================================
+# CUPY BENCHMARK SUITE (GEMM + STRESS)
+# =============================================================================
+
+def run_cupy_suite(
+    n: int = GEMM_SIZE_DEFAULT,
+    iters: int = GEMM_ITERS_DEFAULT,
+    warmup: int = GEMM_WARMUP_DEFAULT,
+) -> Dict[str, Any]:
+    """
+    Run a CuPy-based GEMM benchmark as a sibling to the PyTorch/NVMath GEMM tests.
+    This validates:
+      - CuPy is installed and can see a CUDA device
+      - Basic GEMM performance on the RTX 5090
+
+    Returns a dict with success flag and measured TFLOP/s where available.
+    """
+    hr("CuPy Diagnostics + GEMM Benchmark")
+
+    results: Dict[str, Any] = {
+        "installed": cp is not None,
+        "cuda_available": False,
+        "fp32_tflops": None,
+        "fp16_tflops": None,
+    }
+
+    if cp is None:
+        print("❌ CuPy is not installed (pip install cupy-cudaXXX).")
+        return results
+
+    # Check CuPy CUDA availability
+    try:
+        dev = cp.cuda.Device(0)
+        dev.use()
+        results["cuda_available"] = True
+        print(f"✅ CuPy sees CUDA device 0: {dev}")
+    except Exception as e:
+        print("❌ CuPy cannot access CUDA device 0:", repr(e))
+        return results
+
+    m = n
+    k = n
+    flops_per_iter = compute_gemm_flops(n, m, k)
+
+    def bench_gemm(dtype, label: str) -> Optional[float]:
+        if cp is None:
+            print("❌ CuPy is not available. Skipping GEMM benchmark.")
+            return None
+        try:
+            print(f"\n[CuPy] {label} GEMM: {m} x {k} @ {k} x {n}, dtype={dtype}")
+            # Allocate
+            A = cp.random.randn(m, k).astype(dtype)
+            B = cp.random.randn(k, n).astype(dtype)
+
+            # Warmup
+            for _ in range(warmup):
+                _ = A @ B
+            cp.cuda.Stream.null.synchronize()
+
+            # Timed
+            t0 = time.time()
+            for _ in range(iters):
+                C = A @ B
+            cp.cuda.Stream.null.synchronize()
+            t1 = time.time()
+
+            total_time = t1 - t0
+            time_per_iter = total_time / iters if iters > 0 else float("inf")
+            tflops = flops_per_iter / time_per_iter / 1e12
+
+            print(
+                f"  Total time: {total_time*1000:.2f} ms "
+                f"({time_per_iter*1000:.2f} ms/iter), "
+                f"Rate: {tflops:0.2f} TFLOP/s"
+            )
+            return tflops
+        except Exception as e:
+            print(f"❌ CuPy {label} GEMM FAILED:", repr(e))
+            return None
+
+    # fp32 benchmark
+    results["fp32_tflops"] = bench_gemm(cp.float32, "fp32")
+
+    # fp16 benchmark (if supported)
+    results["fp16_tflops"] = bench_gemm(cp.float16, "fp16")
+
+    return results
+
+# =============================================================================
+# TENSORRT SMOKE TEST + MICRO-BENCHMARK (TRT 8/9/10 COMPATIBLE)
+# =============================================================================
+
+def run_tensorrt_suite() -> Dict[str, Any]:
+    """
+    Simple TensorRT smoke test and micro-benchmark.
+
+    - Verifies TensorRT Python bindings are importable.
+    - Builds a trivial identity engine (1x3x224x224) and measures build time.
+    - Runs a single inference (if PyCUDA is available) to ensure the engine executes.
+
+    Designed to work with both older TensorRT (8.x/9.x) and newer 10.x APIs:
+      * If config.max_workspace_size exists -> use legacy style.
+      * Else, use config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, size).
+      * If builder.build_engine exists -> use it.
+      * Else, use builder.build_serialized_network + trt.Runtime.
+    """
+    hr("TensorRT Smoke Test + Micro-Benchmark")
+
+    results: Dict[str, Any] = {
+        "installed": trt is not None,
+        "engine_built": False,
+        "build_time_ms": None,
+        "inference_time_ms": None,
+    }
+
+    if trt is None:
+        print("❌ TensorRT Python module not installed (pip install tensorrt).")
+        return results
+
+    # Basic version info
+    try:
+        trt_ver = trt.__version__
+    except Exception:
+        trt_ver = "Unknown"
+
+    print(f"TensorRT version: {trt_ver}")
+
+    engine = None  # Initialize to avoid potential unbound variable
+
+    try:
+        logger = trt.Logger(trt.Logger.Severity.WARNING) # type: ignore
+        builder = trt.Builder(logger) # type: ignore
+
+        # Try to create network in EXPLICIT_BATCH mode if available
+        if hasattr(trt, "NetworkDefinitionCreationFlag"):
+            network_flags = int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH) # type: ignore
+            print("Using EXPLICIT_BATCH network flag.")
+            network = builder.create_network(flags=network_flags)
+        else:
+            print("NetworkDefinitionCreationFlag not available; using default create_network().")
+            network = builder.create_network()
+
+        # BuilderConfig may differ between TRT versions
+        config = builder.create_builder_config()
+        print(f"IBuilderConfig type: {type(config)}")
+
+        # Workspace configuration – handle old and new APIs
+        workspace_bytes = 1 << 26  # 64 MiB for tiny test
+
+        if hasattr(config, "max_workspace_size"):
+            # Legacy API (TRT 7/8/9)
+            print("Config has 'max_workspace_size' attribute; using legacy workspace API.")
+            config.max_workspace_size = workspace_bytes
+        elif hasattr(config, "set_memory_pool_limit") and hasattr(trt, "MemoryPoolType"):
+            # TRT 10-style API
+            print("Using set_memory_pool_limit(MemoryPoolType.WORKSPACE, size) API.")
+            try:
+                config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes) # type: ignore
+            except Exception as e:
+                print("⚠️ Failed to call config.set_memory_pool_limit:", repr(e))
+        else:
+            print("⚠️ No known workspace configuration API found on IBuilderConfig; proceeding with defaults.")
+
+        # Input: NCHW, N=1, C=3, H=224, W=224
+        input_tensor = network.add_input(
+            name="input",
+            dtype=_trt_float_dtype(),
+            shape=(1, 3, 224, 224),
+        )
+
+        # Identity layer
+        identity = network.add_identity(input_tensor)
+        identity.get_output(0).name = "output"
+        network.mark_output(identity.get_output(0))
+
+        # Engine build – support both old and new builder APIs
+        print("Building a trivial TensorRT identity engine...")
+
+        t0 = time.time()
+        serialized_engine = None
+
+        if hasattr(builder, "build_engine"):
+            # Older API: directly build IEngine
+            print("Using builder.build_engine(network, config).")
+            engine = builder.build_engine(network, config)
+        elif hasattr(builder, "build_serialized_network"):
+            # Newer API: build serialized network then deserialize
+            print("Using builder.build_serialized_network(...) + trt.Runtime().")
+            serialized_engine = builder.build_serialized_network(network, config)
+            runtime = trt.Runtime(logger) # type: ignore
+            engine = runtime.deserialize_cuda_engine(serialized_engine)
+        else:
+            print("❌ Builder has neither build_engine nor build_serialized_network.")
+            results["engine_built"] = False
+            return results
+
+        t1 = time.time()
+
+        if engine is None:
+            print("❌ Failed to build TensorRT engine (engine is None).")
+            return results
+
+        results["engine_built"] = True
+        results["build_time_ms"] = (t1 - t0) * 1000.0
+        print(f"✅ Engine build OK. Time: {results['build_time_ms']:.2f} ms")
+
+        # Try a simple inference if PyCUDA is available
+        if not PYCUDA_AVAILABLE:
+            print("PyCUDA not available or not usable; skipping inference timing.")
+            print(f"  Reason: {PYCUDA_REASON}")
+            print("  If this is a venv issue, run this script with the same Python that can 'import pycuda'.")
+            return results
+
+        # Reimport cuda to ensure it's the actual module (not None)
+        try:
+            import pycuda.driver as cuda
+        except Exception as e:
+            print(f"Failed to import pycuda.driver for inference: {repr(e)}")
+            return results
+
+        print("Running a single inference with PyCUDA for smoke test...")
+        import numpy as _np
+
+        context = engine.create_execution_context()
+        # host buffers
+        inp = _np.random.randn(1, 3, 224, 224).astype(_np.float32)
+        out = _np.empty_like(inp)
+
+        # device buffers
+        d_input = cuda.mem_alloc(inp.nbytes) # type: ignore
+        d_output = cuda.mem_alloc(out.nbytes) # type: ignore
+
+        # copy input to device
+        cuda.memcpy_htod(d_input, inp) # type: ignore
+
+        bindings = [int(d_input), int(d_output)]
+
+        t2 = time.time()
+        context.execute_v2(bindings)
+        cuda.Context.synchronize() # type: ignore
+        t3 = time.time()
+
+        # copy back result
+        cuda.memcpy_dtoh(out, d_output) # type: ignore
+
+        results["inference_time_ms"] = (t3 - t2) * 1000.0
+        print(f"✅ Inference OK. Time: {results['inference_time_ms']:.2f} ms")
+
+    except Exception as e:
+        print("❌ TensorRT smoke test FAILED:", repr(e))
+
+    return results
 
 # =============================================================================
 # SYSTEM / DRIVER / CPU / CUDA PATH
@@ -224,6 +523,103 @@ def print_cuda_path() -> None:
     if not found:
         print("No CUDA directories found in PATH.")
 
+# =============================================================================
+# NVIDIA CLI TOOLS SCANNER
+# =============================================================================
+
+def scan_nvidia_cli_tools() -> None:
+    """
+    Check PATH for useful NVIDIA / CUDA CLI tools:
+
+      - nvidia-smi
+      - nvcc
+      - ptxas
+      - cuda-gdb
+      - cuda-memcheck
+      - ncu (Nsight Compute CLI)
+      - nsys (Nsight Systems CLI)
+      - nsight-sys, nsight-compute (desktop launchers, if on PATH)
+    """
+    hr("NVIDIA CLI Tools on PATH")
+
+    tools = [
+        "nvidia-smi",
+        "nvcc",
+        "ptxas",
+        "cuda-gdb",
+        "cuda-memcheck",
+        "ncu",
+        "nsys",
+        "nsight-sys",
+        "nsight-compute",
+    ]
+
+    for t in tools:
+        path = which(t)
+        if path:
+            print(f"  {t:15s} -> {path}")
+        else:
+            print(f"  {t:15s} -> (not found in PATH)")
+
+# =============================================================================
+# PYTHON-LEVEL NVIDIA / CUDA MODULE SCANNER
+# =============================================================================
+
+def scan_python_nvidia_modules() -> None:
+    """
+    Scan the active Python environment for modules whose names suggest NVIDIA /
+    CUDA / GPU relevance. This is a heuristic: it will find things like:
+
+      - nvidia-*
+      - cuda-*, cupy, numba, pycuda, triton
+      - rapids libs: cuml, cugraph, cusignal, cupy, rmm, etc.
+      - tensorrt, onnxruntime-gpu, etc.
+
+    It does NOT import everything; it just lists them by name and spec location.
+    """
+    import pkgutil
+    import importlib.util
+
+    hr("Python NVIDIA / CUDA Modules Scan")
+
+    keywords = [
+        "nvidia",
+        "cuda",
+        "cupy",
+        "cuml",
+        "cugraph",
+        "cusignal",
+        "cudf",
+        "rmm",
+        "pycuda",
+        "numba",
+        "tensorrt",
+        "onnxruntime",
+        "modulus",
+        "kaolin",
+        "triton",
+    ]
+
+    found = []
+
+    for m in pkgutil.iter_modules():
+        name = m.name.lower()
+        if any(k in name for k in keywords):
+            found.append(m.name)
+
+    if not found:
+        print("No candidate NVIDIA/CUDA-related Python modules found beyond the ones already imported.")
+        return
+
+    found = sorted(set(found))
+    print(f"Found {len(found)} candidate modules:")
+    for name in found:
+        try:
+            spec = importlib.util.find_spec(name)
+            location = getattr(spec, "origin", None) or getattr(spec, "submodule_search_locations", None)
+        except Exception:
+            location = None
+        print(f"  - {name}  (location: {location})")
 
 # =============================================================================
 # GPU CAPABILITIES / INVENTORY
@@ -361,6 +757,373 @@ def print_gpu_capabilities() -> List[Dict[str, Any]]:
 
     return gpu_inventory
 
+
+# =============================================================================
+# CUDA / LIBRARY COMPATIBILITY GRAPH
+# =============================================================================
+
+def _decode_cuda_version_int(v: int) -> str:
+    """
+    Decode CUDA version integer reported by CuPy runtime (e.g. 12030 -> '12.3').
+    """
+    if v is None or v <= 0:
+        return "Unknown"
+    major = v // 1000
+    minor = (v % 1000) // 10
+    return f"{major}.{minor}"
+
+
+def get_cupy_cuda_versions():
+    """
+    Return (cupy_version, runtime_cuda, driver_cuda) strings or (None, None, None)
+    if CuPy is not available.
+
+    runtime_cuda and driver_cuda are derived from CuPy's cuda.runtime introspection.
+    """
+    if 'cp' not in globals() or cp is None:
+        return None, None, None
+
+    try:
+        drv = cp.cuda.runtime.driverGetVersion()
+        rt = cp.cuda.runtime.runtimeGetVersion()
+        drv_str = _decode_cuda_version_int(drv)
+        rt_str = _decode_cuda_version_int(rt)
+        return cp.__version__, rt_str, drv_str
+    except Exception:
+        # Be robust if runtime is misconfigured
+        try:
+            return cp.__version__, "Unknown", "Unknown"
+        except Exception:
+            return None, None, None
+
+
+def get_tensorrt_versions():
+    """
+    Return (tensorrt_version, note) or (None, None) if TensorRT is missing.
+    We do not try to guess its CUDA version from Python – that requires
+    NVIDIA's official compatibility matrix.
+    """
+    if 'trt' not in globals() or trt is None:
+        return None, None
+    try:
+        return trt.__version__, "Uses CUDA libs from installed TensorRT build"
+    except Exception:
+        return None, None
+
+
+def get_nvcc_version():
+    """
+    Parse 'nvcc --version' if available, returning a short CUDA toolkit version string
+    like '12.8' or 'Unknown'.
+    """
+    nvcc_path = which("nvcc")
+    if not nvcc_path:
+        return None
+
+    out = run_cmd(["nvcc", "--version"])
+    if not out:
+        return None
+
+    for line in out.splitlines():
+        line = line.strip()
+        # Typical: "Cuda compilation tools, release 12.8, V12.8.89"
+        if "Cuda compilation tools" in line and "release" in line:
+            parts = line.split("release", 1)[-1].strip().split(",", 1)[0]
+            return parts.strip()
+    return None
+
+
+def print_cuda_compatibility_graph(gpu_inventory: List[Dict[str, Any]]) -> None:
+    """
+    Print a simple compatibility table showing:
+      - Driver version (from nvidia-smi / gpu_inventory)
+      - CUDA toolkit (nvcc) version if available
+      - TensorFlow build CUDA
+      - PyTorch CUDA
+      - CuPy CUDA runtime/driver
+      - NVMath version
+      - TensorRT version
+
+    This does NOT perform deep semantic validation; it just surfaces what each
+    component reports, so you can cross-check against NVIDIA's official tables.
+    """
+    hr("CUDA / Library Compatibility Graph")
+
+    # ------------------ Driver + Toolkit ------------------
+    driver_version = None
+    if gpu_inventory:
+        driver_version = gpu_inventory[0].get("driver_version", None)
+    nvcc_ver = get_nvcc_version()
+
+    print("Driver / Toolkit:")
+    print(f"  NVIDIA Driver:   {driver_version or 'Unknown (see nvidia-smi)'}")
+    print(f"  CUDA Toolkit:    {nvcc_ver or 'nvcc not found / toolkit not on PATH'}")
+
+    # ------------------ TensorFlow ------------------
+    tf_cuda = tf_cudnn = tf_version = None
+    if 'tf' in globals() and tf is not None:
+        try:
+            tf_version = tf.__version__
+            build = tf.sysconfig.get_build_info()
+            tf_cuda = build.get("cuda_version", "Unknown")
+            tf_cudnn = build.get("cudnn_version", "Unknown")
+        except Exception:
+            tf_version = tf_version or "Unknown"
+            tf_cuda = tf_cuda or "Unknown"
+            tf_cudnn = tf_cudnn or "Unknown"
+
+    # ------------------ PyTorch ------------------
+    torch_version = None
+    torch_cuda = None
+    if 'torch' in globals() and torch is not None:
+        try:
+            torch_version = torch.__version__
+            torch_cuda = torch.version.cuda or "Unknown"
+        except Exception:
+            pass
+
+    # ------------------ CuPy ------------------
+    cupy_ver, cupy_rt_cuda, cupy_drv_cuda = get_cupy_cuda_versions()
+
+    # ------------------ NVMath ------------------
+    nvmath_ver = None
+    if 'nvmath' in globals() and nvmath is not None:
+        nvmath_ver = getattr(nvmath, "__version__", "Unknown")
+
+    # ------------------ TensorRT ------------------
+    trt_ver, trt_note = get_tensorrt_versions()
+
+    print("\nComponents:")
+    header = (
+        f"{'Component':<12} | {'Version':<16} | {'CUDA runtime / build':<24} | {'Notes'}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    def row(name, ver, cuda_str, notes=""):
+        print(f"{name:<12} | {ver:<16} | {cuda_str:<24} | {notes}")
+
+    # Driver / toolkit
+    row("Driver", driver_version or "Unknown", "-", "From nvidia-smi")
+    row("Toolkit", nvcc_ver or "Unknown", "-", "From nvcc --version")
+
+    # TF
+    if tf is not None:
+        cuda_str = f"CUDA {tf_cuda or 'Unknown'}, cuDNN {tf_cudnn or 'Unknown'}"
+        row("TensorFlow", tf_version or "Unknown", cuda_str, "tf.sysconfig.get_build_info()")
+    else:
+        row("TensorFlow", "Not installed", "-", "")
+
+    # PyTorch
+    if torch is not None:
+        row("PyTorch", torch_version or "Unknown", f"CUDA {torch_cuda or 'Unknown'}", "torch.version.cuda")
+    else:
+        row("PyTorch", "Not installed", "-", "")
+
+    # CuPy
+    if cupy_ver is not None:
+        cuda_details = f"runtime {cupy_rt_cuda}, driver {cupy_drv_cuda}"
+        row("CuPy", cupy_ver, cuda_details, "cp.cuda.runtime.*Version()")
+    else:
+        row("CuPy", "Not installed", "-", "")
+
+    # NVMath
+    if nvmath is not None:
+        row("NVMath", nvmath_ver or "Unknown", "Uses CUDA via nvmath-python", "See NVMath docs")
+    else:
+        row("NVMath", "Not installed", "-", "")
+
+    # TensorRT
+    if trt_ver is not None:
+        row("TensorRT", trt_ver, "Uses CUDA from TensorRT build", trt_note or "")
+    else:
+        row("TensorRT", "Not installed", "-", "")
+
+    print("\nUse this table with NVIDIA's official compatibility matrix to validate that")
+    print("your driver, toolkit, and libraries are aligned for the RTX 5090.")
+
+
+# =============================================================================
+# RTX 5090 / BLACKWELL OPTIMIZATION PLAN
+# =============================================================================
+
+def print_rtx5090_optimization_plan(
+    gpu_inventory: List[Dict[str, Any]],
+    tf_present: bool,
+    torch_present: bool,
+    cupy_present: bool,
+    tensorrt_present: bool,
+) -> None:
+    """
+    Emit a recommended optimization plan for an RTX 5090-class GPU.
+
+    We infer "Blackwell-class" if:
+      - compute_cap >= 12.0 OR
+      - GPU name contains '5090' (case-insensitive)
+
+    The plan is advisory text: CUDA / TF / Torch / CuPy / TensorRT alignment,
+    precision modes, and general best practices for your mel / GEMM workloads.
+    """
+    hr("RTX 5090 Optimization Plan")
+
+    if not gpu_inventory:
+        print("No GPU inventory data; cannot tailor plan. Using generic guidance.")
+        cc = None
+        name = "Unknown GPU"
+    else:
+        g0 = gpu_inventory[0]
+        cc = g0.get("compute_cap", None)
+        name = g0.get("name", "Unknown GPU")
+
+    name_lower = (name or "").lower()
+    is_blackwell_like = False
+    if cc is not None and cc >= 12.0:
+        is_blackwell_like = True
+    if "5090" in name_lower or "blackwell" in name_lower:
+        is_blackwell_like = True
+
+    print(f"Detected GPU[0]: {name} (compute capability={cc})")
+    if not is_blackwell_like:
+        print("Plan below is still applicable, but tuned for RTX 5090 / Blackwell-class GPUs.\n")
+
+    print("1. Driver / CUDA / cuDNN baseline")
+    print("   - Keep NVIDIA driver at or above the version recommended for recent CUDA 12.x.")
+    print("   - Prefer CUDA 12.8.x toolkit for Blackwell-class GPUs when stable in your distro.")
+    print("   - Use cuDNN 9.x for best convolution performance on modern architectures.")
+
+    print("\n2. TensorFlow stack (if in use)")
+    if tf_present:
+        print("   - Target recent TensorFlow 2.x builds compiled against CUDA 12.5+ / 12.8.x.")
+        print("   - Enable memory growth (already enabled in this script) to avoid full VRAM grab.")
+        print("   - For training/inference:")
+        print("       * Enable mixed precision (float16 / bfloat16) if your model is stable.")
+        print("       * Enable XLA where beneficial (tf.function(jit_compile=True) on hot paths).")
+        print("       * Monitor first-run latency due to PTX JIT; consider ahead-of-time builds if needed.")
+    else:
+        print("   - TensorFlow not detected; skip unless you plan TF workloads.")
+
+    print("\n3. PyTorch stack (if in use)")
+    if torch_present:
+        print("   - Install a PyTorch build compiled against a recent CUDA 12.x runtime.")
+        print("   - In your training code:")
+        print("       * torch.backends.cuda.matmul.allow_tf32 = True")
+        print("       * torch.backends.cudnn.allow_tf32 = True")
+        print("       * torch.set_float32_matmul_precision('high')")
+        print("       * Use pin_memory=True and non_blocking=True in DataLoader / .to(device).")
+        print("       * Use multiple worker processes for I/O (num_workers tuned to CPU cores / storage).")
+        print("       * Consider multiple CUDA streams for overlap of H2D copies and compute.")
+    else:
+        print("   - PyTorch not detected; install if you prefer Torch-based models.")
+
+    print("\n4. CuPy / NVMath numerical kernels")
+    if cupy_present:
+        print("   - Use CuPy for custom kernels and array ops that complement PyTorch/TF.")
+        print("   - Align CuPy's CUDA variant (cupy-cudaXXX) with your installed toolkit (e.g., cuda12x).")
+        print("   - Use float16 / bfloat16 in heavy GEMMs when acceptable; benchmark vs NVMath / Torch.")
+    else:
+        print("   - CuPy not detected; install with a CUDA-matched wheel (e.g., cupy-cuda12x).")
+
+    if 'nvmath' in globals() and nvmath is not None:
+        print("   - NVMath (nvmath-python) can provide high-performance GEMM; compare its TFLOPs")
+        print("     vs PyTorch/CuPy for your target GEMM sizes (e.g., 12288x12288).")
+
+    print("\n5. TensorRT optimization (if in use)")
+    if tensorrt_present:
+        print("   - Use TensorRT for latency-critical inference paths.")
+        print("   - Prefer FP16 or BF16 engines by default; experiment with FP8 when Blackwell support")
+        print("     is production-ready in your stack.")
+        print("   - Calibrate INT8 only when you have solid calibration datasets.")
+    else:
+        print("   - TensorRT not detected; add it later for low-latency inference deployment.")
+
+    print("\n6. General GPU utilization and pipeline tuning")
+    print("   - Ensure input pipelines (NVMe → CPU → GPU) are saturated: monitor GPU utilization")
+    print("     while your mel pipeline runs (nvidia-smi, nsight, or your status reporter).")
+    print("   - Keep batch sizes large enough to reach high SM occupancy, but below OOM thresholds.")
+    print("   - For large GEMMs / FFTs / mel pipelines, avoid thrashing VRAM: reuse buffers and")
+    print("     favor pre-allocated workspaces (as this suite and your pipeline already do).")
+    print("   - Profile frequently with Nsight Systems / Nsight Compute to check for:")
+    print("       * Kernel launch overhead")
+    print("       * Under-utilized SMs")
+    print("       * PCIe bottlenecks (H2D/D2H transfers overlapping poorly with compute)")
+
+# =============================================================================
+# SYSTEM-LEVEL CUDA / NVIDIA SHARED LIB SCANNER
+# =============================================================================
+
+def scan_system_cuda_libs() -> None:
+    """
+    Scan common library directories for CUDA / cuDNN / TensorRT / NVML libraries.
+
+    Directories checked (if they exist):
+      - /usr/lib/x86_64-linux-gnu
+      - /usr/local/cuda/lib64
+      - /usr/local/cuda-*/lib64
+
+    We list libs matching patterns like:
+      - libcud*
+      - libcu*
+      - libnvinfer*
+      - libcudnn*
+      - libnvrtc*
+      - libnvToolsExt*
+      - libnccl*
+    """
+    hr("System CUDA / NVIDIA Shared Libraries")
+
+    base_dirs = [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/local/cuda/lib64",
+    ]
+
+    # Add /usr/local/cuda-*/lib64
+    cuda_root = "/usr/local"
+    try:
+        for entry in os.listdir(cuda_root):
+            if entry.startswith("cuda-"):
+                libdir = os.path.join(cuda_root, entry, "lib64")
+                base_dirs.append(libdir)
+    except Exception:
+        pass
+
+    patterns = (
+        "libcudart",
+        "libcublas",
+        "libcufft",
+        "libcurand",
+        "libcusolver",
+        "libcusparse",
+        "libcudnn",
+        "libnvinfer",
+        "libnvonnxparser",
+        "libnvrtc",
+        "libnvToolsExt",
+        "libnvml",
+        "libnccl",
+        "libcutensor",
+    )
+
+    seen_libs = set()
+
+    for d in base_dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            entries = os.listdir(d)
+        except Exception:
+            continue
+
+        for fname in entries:
+            for p in patterns:
+                if fname.startswith(p):
+                    seen_libs.add(os.path.join(d, fname))
+
+    if not seen_libs:
+        print("No CUDA / NVIDIA shared libraries found in the scanned directories.")
+        return
+
+    for lib in sorted(seen_libs):
+        print("  ", lib)
 
 # =============================================================================
 # PTXAS TESTS
@@ -1495,6 +2258,9 @@ def print_resources(has_gpu: bool) -> None:
 
 
 def main() -> None:
+    hr("Python Interpreter Info")
+    print("sys.executable:", sys.executable)
+    print("sys.version:", sys.version.replace("\n", " "))
     parser = argparse.ArgumentParser(
         description="GPU diagnostics + TF/PTXAS + PyTorch + NVMath GEMM benchmarks"
     )
@@ -1538,6 +2304,8 @@ def main() -> None:
     print_init_nvml()
     print_cpu_info()
 
+    scan_nvidia_cli_tools()
+
     gpu_inventory = print_gpu_capabilities()
     gpu0_info = gpu_inventory[0] if gpu_inventory else None
 
@@ -1545,10 +2313,22 @@ def main() -> None:
     print_tf_info()
     analyze_gpu(gpus)
 
+    print_cuda_compatibility_graph(gpu_inventory)
+
+    scan_python_nvidia_modules()
+    scan_system_cuda_libs()
+
     has_gpu = bool(gpus)
 
     tf_results = run_tensorflow_suite(gpus, gpu0_info)
     torch_results = run_pytorch_suite(gpu0_info)
+
+    cupy_results = run_cupy_suite(
+        n=gemm_size,
+        iters=gemm_iters,
+        warmup=gemm_warmup,
+    )
+    tensorrt_results = run_tensorrt_suite()
 
     # GEMM benchmarks (NumPy / PyTorch / NVMath)
     if not args.no_gemm:
@@ -1561,6 +2341,14 @@ def main() -> None:
 
     test_ptxas()
     print_resources(has_gpu)
+
+    print_rtx5090_optimization_plan(
+        gpu_inventory=gpu_inventory,
+        tf_present=(tf is not None),
+        torch_present=(torch is not None),
+        cupy_present=('cp' in globals() and cp is not None),
+        tensorrt_present=('trt' in globals() and trt is not None),
+    )
 
     hr("Summary (Diagnostics + Medium Stress Tests)")
     print("TensorFlow:")
@@ -1578,6 +2366,18 @@ def main() -> None:
     print(f"  GPU matmul OK:  {torch_results.get('gpu_matmul_ok')}")
     print(f"  GPU grad OK:    {torch_results.get('gpu_grad_ok')}")
     print(f"  GPU stress OK:  {torch_results.get('gpu_stress_ok')}")
+
+    print("\nCuPy:")
+    print(f"  Installed:      {cupy_results.get('installed')}")
+    print(f"  CUDA available: {cupy_results.get('cuda_available')}")
+    print(f"  fp32 TFLOP/s:   {cupy_results.get('fp32_tflops')}")
+    print(f"  fp16 TFLOP/s:   {cupy_results.get('fp16_tflops')}")
+
+    print("\nTensorRT:")
+    print(f"  Installed:      {tensorrt_results.get('installed')}")
+    print(f"  Engine built:   {tensorrt_results.get('engine_built')}")
+    print(f"  Build time ms:  {tensorrt_results.get('build_time_ms')}")
+    print(f"  Infer time ms:  {tensorrt_results.get('inference_time_ms')}")
 
     print("\nPTXAS:")
     print("  (see PTXAS Diagnostics section above for details)")
