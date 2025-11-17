@@ -8,6 +8,10 @@ import os
 DATAGATE_USERNAME = "emartinez"
 DATAGATE_PASSWORD = "letmein2Umeow!!!"
 
+LOGGER_URL = "https://api.omnicoll.net/datagate/api/loggerapi.ashx"
+RECORDINGS_URL = "https://api.omnicoll.net/datagate/api/recordingsapi.ashx"
+GETRECORDINGS_URL = "https://api.omnicoll.net/datagate/api/getrecordingsapi.ashx"
+
 # Logging configuration
 LOGS_DIR = "/DEVELOPMENT/ROOT_AILH/AILH_LOGS"
 AILH_CACHE = "/DEVELOPMENT/ROOT_AILH/AILH_CACHE"

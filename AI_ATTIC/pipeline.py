@@ -34,9 +34,9 @@ class Config:
         self.GPU_MEMORY_FRACTION = 0.85
 
         # Output
-        self.OUTPUT_DIR = Path("/mnt/d/DEV/mel_memmaps_gpu_seg")
+        self.OUTPUT_DIR = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/MEMMAPS")
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        self.DATASET_PATH = Path("/mnt/d/DATASET_REFERENCE/TRAINING")
+        self.DATASET_PATH = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/TRAINING")
 
         # Device optimization
         self.DEVICE = torch.device("cuda")

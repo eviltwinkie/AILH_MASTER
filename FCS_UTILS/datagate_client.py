@@ -9,7 +9,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from config import DATAGATE_USERNAME, DATAGATE_PASSWORD
+from UTILITIES.old_config import DATAGATE_USERNAME, DATAGATE_PASSWORD
 
 HTTP_TIMEOUT = 60  # seconds
 
