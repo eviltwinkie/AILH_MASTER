@@ -1,0 +1,26 @@
+{
+  "threads": 4,
+  "bufsize": 131072,
+  "method": "osread",
+  "fadvise": "NONE",
+  "use_noatime": true,
+  "max_inflight": 512,
+  "files_per_task": 256,
+  "root": "/DEVELOPMENT/ROOT_AILH/DATA_STORE/TRAINING",
+  "pattern": "*.wav",
+  "min_bytes": 60000,
+  "max_bytes": 120000,
+  "limit": 0,
+  "shuffle": true,
+  "files_per_s": 21058.554,
+  "mbps": 1726.043,
+  "avg_ms": 0.048,
+  "storage_context": {
+    "mount_point": "/",
+    "fstype": "ext4",
+    "device": "/dev/sdd",
+    "block": "sdd",
+    "noatime": false,
+    "relatime": true
+  }
+}

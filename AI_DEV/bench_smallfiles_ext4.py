@@ -16,6 +16,7 @@ import argparse, fnmatch, os, sys, stat, time, itertools, threading, mmap, errno
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import quantiles
+from typing import Dict, Any
 
 # ---------- small helpers ----------
 def _split_env_list(name: str, default: list[str]) -> list[str]:
@@ -70,7 +71,7 @@ class Config:
     """
 
     # ---- Dataset selection defaults ----
-    ROOT        = os.environ.get("SFA_ROOT", "DEVELOPMENT\ROOT_AILH\DATA_STORE/TRAINING")              # empty means "must be provided by CLI or function call"
+    ROOT        = os.environ.get("SFA_ROOT", "/DEVELOPMENT/ROOT_AILH/DATA_STORE/TRAINING")  
     PATTERN     = os.environ.get("SFA_PATTERN", "*.wav")
     MIN_BYTES   = _env_int("SFA_MIN_BYTES", 60000)
     MAX_BYTES   = _env_int("SFA_MAX_BYTES", 120000)
@@ -78,16 +79,23 @@ class Config:
     SHUFFLE     = _env_bool("SFA_SHUFFLE", True)
     TRIALS      = 8
     # ---- Search spaces (coarse) ----
-    #THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [2, 4, 8, 16, 32])
-    THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [4])
-    #BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [8192, 32768, 131072, 524288])
+    THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24])
+    #THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [4])
+    #THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [1])
+    
+    #BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [4096, 8192, 32768, 131072, 524288])
+    #BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [1024, 4096, 8192, 32768, 131072])
     BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [131072])
-    #METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread", "readinto", "mmap"])
-    METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread"])
+    
+    METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread", "readinto", "mmap"])
+    #METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread"])
     FADVISE_COARSE        = _split_env_list    ("SFA_FADVISE",        ["SEQUENTIAL", "WILLNEED", "NONE"])
+    
     #MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [16, 32, 64, 128, 256, 1024])
     MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [64, 128, 256, 512, 1024])
-    FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [256])
+    
+    #FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [256])
+    FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [4096])
 
     # ---- Rounds ----
     ROUNDS      = _env_int("SFA_ROUNDS", 2)       # warm-cache repeats per combo
@@ -192,59 +200,103 @@ def read_sysfs_text(path: str) -> str|None:
     except Exception:
         return None
 
-def detect_device_info(root: Path) -> dict:
-    info = {
-        "mount_point": None, "fstype": None, "device": None,
-        "noatime": None, "relatime": None, "strictatime": None,
-        "model": None, "vendor": None, "serial": None, "block_name": None,
+def detect_device_info(root: Path) -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "mount_point": None,
+        "fstype": None,
+        "device": None,
+        "noatime": None,
+        "relatime": None,
+        "strictatime": None,
+        "model": None,
+        "vendor": None,
+        "serial": None,
+        "block_name": None,
         "lsblk": None,
     }
+
     m = find_mount_for_path(root)
     if not m:
         return info
-    info["mount_point"] = m["mount_point"]
-    info["fstype"] = m["fstype"]
-    info["device"] = m["source"]
-    opts = (m["mount_opts"] or "")
-    info["noatime"] = "noatime" in opts
-    info["relatime"] = "relatime" in opts
-    info["strictatime"] = "strictatime" in opts
-    block = base_block_name(info["device"] or ""); info["block_name"] = block
 
+    info["mount_point"] = m.get("mount_point")
+    info["fstype"] = m.get("fstype")
+    info["device"] = m.get("source")
+
+    # Parse mount options as a set of flags
+    opts_raw = m.get("mount_opts") or ""
+    opt_flags = set(o.strip() for o in opts_raw.split(",") if o.strip())
+
+    info["noatime"] = "noatime" in opt_flags
+    info["relatime"] = "relatime" in opt_flags
+    info["strictatime"] = "strictatime" in opt_flags
+
+    block = base_block_name(info["device"] or "")
+    info["block_name"] = block
+
+    # Read model/vendor/serial from sysfs if possible
     if block:
         if block.startswith("nvme"):
             dev_link = f"/sys/class/block/{block}/device"
             try:
                 real = os.path.realpath(dev_link)
                 parts = real.split("/")
-                nvme_ctrl = next((p for p in parts if p.startswith("nvme") and p[-1].isdigit()), None)
+                # Try to find something like "nvme0"
+                nvme_ctrl = next(
+                    (p for p in parts if p.startswith("nvme") and p[-1].isdigit()),
+                    None,
+                )
                 ctrl = nvme_ctrl or "nvme0"
             except Exception:
                 ctrl = "nvme0"
-            info["model"]  = read_sysfs_text(f"/sys/class/nvme/{ctrl}/model")
+
+            info["model"] = read_sysfs_text(f"/sys/class/nvme/{ctrl}/model")
             info["serial"] = read_sysfs_text(f"/sys/class/nvme/{ctrl}/serial")
         else:
-            info["model"]  = read_sysfs_text(f"/sys/block/{block}/device/model")
+            info["model"] = read_sysfs_text(f"/sys/block/{block}/device/model")
             info["vendor"] = read_sysfs_text(f"/sys/block/{block}/device/vendor")
 
+    # Fallback / enrichment via lsblk
     try:
-        out = subprocess.check_output(["lsblk", "-ndo", "NAME,MODEL,SERIAL,PKNAME,TYPE"], text=True).strip().splitlines()
-        info["lsblk"] = out
+        out = subprocess.check_output(
+            ["lsblk", "-ndo", "NAME,MODEL,SERIAL,PKNAME,TYPE"],
+            text=True,
+        ).strip()
+
+        if out:
+            lines = out.splitlines()
+        else:
+            lines = []
+
+        info["lsblk"] = lines
+
+        # If we still don't have model or serial, try to infer from lsblk output
         if (info["model"] is None or info["serial"] is None) and block:
-            for line in out:
-                cols = line.split(None, 5)
+            for line in lines:
+                if not line.strip():
+                    continue
+
+                # NAME MODEL SERIAL PKNAME TYPE
+                cols = line.split(None, 4)
                 if not cols:
                     continue
+
                 name = cols[0]
                 model = cols[1] if len(cols) > 1 else None
                 serial = cols[2] if len(cols) > 2 else None
                 pkname = cols[3] if len(cols) > 3 else None
+                # type_field = cols[4] if len(cols) > 4 else None  # unused currently
+
                 if name == block or pkname == block:
-                    info["model"] = info["model"] or model
-                    info["serial"] = info["serial"] or serial
+                    if info["model"] is None:
+                        info["model"] = model
+                    if info["serial"] is None:
+                        info["serial"] = serial
                     break
     except Exception:
+        # lsblk not available or failed – leave lsblk/model/serial as-is
         pass
+
     return info
 
 # ---------- O_NOATIME test ----------
@@ -292,7 +344,7 @@ def read_with_os_read(path: Path, bufsize: int, use_noatime: bool, fadvise: str|
         total = 0
         buf = bytearray(bufsize)
         mv = memoryview(buf)
-        t0 = time.perf_counter() if record_latencies else None
+        t0 = time.perf_counter()
 
         # read loop: fill mv using readv
         while True:
@@ -329,7 +381,7 @@ def read_with_readinto(path: Path, bufsize: int, use_noatime: bool, fadvise: str
         total = 0
         buf = bytearray(bufsize)
         mv = memoryview(buf)
-        t0 = time.perf_counter() if record_latencies else None
+        t0 = time.perf_counter()
 
         while True:
             n = f.readinto(mv)
@@ -359,7 +411,7 @@ def read_with_mmap(path: Path, _bufsize: int, use_noatime: bool, fadvise: str|No
             hint = {"SEQUENTIAL":2,"RANDOM":1,"WILLNEED":3}.get(fadvise, 0)
             if hint:
                 os.posix_fadvise(fd, 0, 0, hint)
-        t0 = time.perf_counter() if record_latencies else None
+        t0 = time.perf_counter()
         if st.st_size == 0:
             lat = time.perf_counter() - t0 if record_latencies else None
             return 0, lat
@@ -389,7 +441,7 @@ def read_with_sendfile(path: Path, _bufsize: int, use_noatime: bool, fadvise: st
                 os.posix_fadvise(fd_in, 0, 0, hint)
         st = os.fstat(fd_in)
         remain, offset = st.st_size, 0
-        t0 = time.perf_counter() if record_latencies else None
+        t0 = time.perf_counter()
         while remain > 0:
             sent = os.sendfile(fd_out, fd_in, offset, remain)
             if sent == 0:

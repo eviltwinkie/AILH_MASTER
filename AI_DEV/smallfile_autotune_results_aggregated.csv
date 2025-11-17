@@ -1,0 +1,3 @@
+threads,bufsize,method,fadvise,noatime,max_inflight,files_per_task,runs,files_per_s_mean,files_per_s_sd,avg_ms_mean,avg_ms_sd,mbps_mean,mbps_sd
+4,131072,osread,NONE,1,512,256,9,21058.554,807.761,0.048,0.002,1726.043,66.207
+4,131072,osread,NONE,1,1024,256,9,20843.943,500.188,0.048,0.001,1708.453,40.997

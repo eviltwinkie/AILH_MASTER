@@ -10,34 +10,27 @@ from concurrent.futures import ThreadPoolExecutor , as_completed
 import torch
 import torchaudio
 import psutil
-
 import pynvml
 
 # ===== CONFIG =====
 class Config:
     def __init__(self):
-
         # CPU settings
         self.CPU_THREADS = 12
-
         # GPU settings
         self.GPU_BATCH_SIZE = 256
         self.CUDA_STREAMS = 4
         self.GPU_MEMORY_FRACTION = 0.85
-
         # CPU-GPU buffer settings
         self.CPU_GPU_BUFFER_SIZE = 240  # in number of audio files
         self.CPU_GPU_BUFFER_TIMEOUT_MS = 25  # in milliseconds
-
         # RAM buffer settings
         self.RAM_PREFETCH_DEPTH = 12
         self.RAM_AUDIO_Q_SIZE = 4 # minimum number of files loaded into the shared queue before the pipeline proceeds
-
         # Disk prefetch settings
         self.PREFETCH_THREADS = 1
         self.PREFETCH_DEPTH = 1
         self.FILES_PER_TASK = 4096
-
         # Audio / segmentation
         self.SAMPLE_RATE = 4096
         self.SAMPLE_LENGTH_SEC = 10
@@ -46,12 +39,10 @@ class Config:
         self.N_FFT = 512
         self.HOP_LENGTH = 128
         self.N_MELS = 32
-
         # Output / dataset paths
         self.OUTPUT_DIR = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/MEMMAPS")
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.DATASET_PATH = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/TRAINING")
-
         # Device optimization
         self.DEVICE = torch.device("cuda")
         torch.backends.cudnn.benchmark = True
@@ -59,11 +50,8 @@ class Config:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.cuda.set_per_process_memory_fraction(self.GPU_MEMORY_FRACTION)
         torch.cuda.empty_cache()
-
         # CUDA streams
         self.compute_streams = [torch.cuda.Stream() for _ in range(self.CUDA_STREAMS)]
-
-
 cfg = Config()
 
 
