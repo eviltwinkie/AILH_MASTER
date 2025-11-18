@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime, timedelta, UTC
 from datagate_client import fetch_data
 
-LOGS_DIR = "/DEVELOPMENT/ROOT_AILH/AILH_LOGS"
+LOGS_DIR = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_LOGS/FCS"
 DATA_SENSORS = "/DEVELOPMENT/ROOT_AILH/DATA_SENSORS"
 LOGGER_URL = "https://api.omnicoll.net/datagate/api/loggerapi.ashx"
 RECORDINGS_URL = "https://api.omnicoll.net/datagate/api/recordingsapi.ashx"
@@ -104,7 +104,7 @@ async def get_logger_recordings_list(loggers_array):
             }
             xml_data = await fetch_data(params, RECORDINGS_URL)
             parsed_dict = xmltodict.parse(xml_data)
-            new_recs = parsed_dict.get("recordings", {}).get("recording", [])
+            new_recs = (parsed_dict.get("recordings", {}) or {}).get("recording", []) # type: ignore
             if isinstance(new_recs, dict):
                 new_recs = [new_recs]
             elif not isinstance(new_recs, list):

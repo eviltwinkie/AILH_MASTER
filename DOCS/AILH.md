@@ -119,6 +119,8 @@ All code in AI_DEV is the collection of various development efforts to use as re
 
 vvvvvvvvvvvvvvvvvvvvvvv FOLDER STRUCTURE / LAYOUT vvvvvvvvvvvvvvvvvvvvvvv 
 
+/DEVELOPMENT/ROOT_AILH
+
 ROOT_AILH
 |
 ├── ATTIC (STORAGE FILES/DOCS)

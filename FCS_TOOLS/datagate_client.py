@@ -3,15 +3,23 @@ import os
 import sys
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
-from typing import Optional
+from typing import Optional, Tuple
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
+# Credential pairs: (username, password)
+CREDENTIALS = [
+    ("sbartal", "Sb749499houstonTX"),
+    ("emartinez", "letmein2Umeow!!!"),
+]
 
-from old_config import DATAGATE_USERNAME, DATAGATE_PASSWORD
+# Track current credential index
+_current_cred_index = 0
 
-HTTP_TIMEOUT = 60  # seconds
+def get_next_credentials() -> Tuple[str, str]:
+    """Rotate to next credential pair and return (username, password)."""
+    global _current_cred_index
+    username, password = CREDENTIALS[_current_cred_index]
+    _current_cred_index = (_current_cred_index + 1) % len(CREDENTIALS)
+    return username, password
 
 @retry(
     stop=stop_after_attempt(5),
@@ -20,17 +28,19 @@ HTTP_TIMEOUT = 60  # seconds
 )
 
 async def safe_get(client: httpx.AsyncClient, url: str, headers: Optional[dict] = None, params: Optional[dict] = None) -> httpx.Response:
-    return await client.get(url, headers=headers, params=params)
+    resp = await client.get(url, headers=headers, params=params)
+    resp.raise_for_status()
+    return resp
 
 async def fetch_data(fetch_params: dict, datagate_url: str):
+    username, password = get_next_credentials()
     params = {
-        "Username": DATAGATE_USERNAME,
-        "Password": DATAGATE_PASSWORD,
+        "Username": username,
+        "Password": password,
     }
     params.update(fetch_params)
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         resp = await safe_get(client, datagate_url, params=params)
-        resp.raise_for_status()
         content_type = resp.headers.get("Content-Type", "").lower()
         if content_type.startswith("text/") or \
            "application/json" in content_type or \
