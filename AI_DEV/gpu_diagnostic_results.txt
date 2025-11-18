@@ -1,49 +1,50 @@
 
 ================================================================================
-Python Interpreter Info
+  Python Interpreter Info
 ================================================================================
 sys.executable: /home/emartinez/venvs/mlenv/bin/python3
 sys.version: 3.12.3 (main, Aug 14 2025, 17:47:21) [GCC 13.3.0]
 
 ================================================================================
-NVIDIA Driver
+  NVIDIA Driver
 ================================================================================
-| NVIDIA-SMI 580.105.07             Driver Version: 581.80         CUDA Version: 13.0     |
+✅ | NVIDIA-SMI 580.105.07             Driver Version: 581.80         CUDA Version: 13.0     |
 
 ================================================================================
-CUDA PATH Check
+  CUDA PATH Check
 ================================================================================
-   /usr/local/cuda-12.8/bin
+  /usr/local/cuda-12.8/bin
+✅ Found 1 CUDA directories in PATH
 
 ================================================================================
-NVML Detection
+  NVML Initialization
 ================================================================================
-[INFO] NVML initialized: version 13.580.105.07
+✅ NVML initialized: version 13.580.105.07
 
 ================================================================================
-CPU Diagnostics
+  CPU Diagnostics
 ================================================================================
-CPU cores: 24
-Architecture: x86_64
-Processor string: x86_64
-CPU brand: Intel(R) Core(TM) Ultra 9 275HX
-CPU bits:  64
+  Cores:       24
+  Architecture: x86_64
+  Processor:   x86_64
+  Brand:       Intel(R) Core(TM) Ultra 9 275HX
+  Bits:        64
 
 ================================================================================
-NVIDIA CLI Tools on PATH
+  NVIDIA CLI Tools on PATH
 ================================================================================
   nvidia-smi      -> /usr/lib/wsl/lib/nvidia-smi
   nvcc            -> /usr/local/cuda-12.8/bin/nvcc
   ptxas           -> /usr/local/cuda-12.8/bin/ptxas
   cuda-gdb        -> /usr/local/cuda-12.8/bin/cuda-gdb
-  cuda-memcheck   -> (not found in PATH)
+  cuda-memcheck   (not found)
   ncu             -> /usr/local/cuda-12.8/bin/ncu
   nsys            -> /usr/local/cuda-12.8/bin/nsys
   nsight-sys      -> /usr/local/cuda-12.8/bin/nsight-sys
-  nsight-compute  -> (not found in PATH)
+  nsight-compute  (not found)
 
 ================================================================================
-GPU Capabilities / Inventory
+  GPU Capabilities / Inventory
 ================================================================================
 nvidia-smi GPU inventory:
 
@@ -53,11 +54,11 @@ GPU[0] NVIDIA GeForce RTX 5090 Laptop GPU
   PCI Bus ID:   00000000:02:00.0
   Driver Ver:   581.80
   Memory Total: 24463 MiB
-  Memory Used:  2371 MiB
-  Memory Free:  21681 MiB
+  Memory Used:  2312 MiB
+  Memory Free:  21740 MiB
   GFX Clock:    2160 MHz
   Mem Clock:    14001 MHz
-  Temperature:  47 C
+  Temperature:  49 C
   Power State:  P0
   Display:      active=Enabled mode=[Requested functionality has been deprecated]
 
@@ -73,13 +74,13 @@ CUDA Device [0] — NVIDIA GeForce RTX 5090 Laptop GPU
   Shared Mem per Block (bytes): 49152
 
 ================================================================================
-TensorFlow GPU Detection
+  TensorFlow GPU Detection
 ================================================================================
 GPUs detected by TensorFlow: 1
   [0] PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')
 
 ================================================================================
-TensorFlow Build Info
+  TensorFlow Build Info
 ================================================================================
 TensorFlow version: 2.20.0-dev0+selfbuilt
 Built with CUDA:  True
@@ -87,7 +88,7 @@ CUDA runtime:     12.8.1
 cuDNN runtime:    9
 
 ================================================================================
-Compute Capability Analysis
+  Compute Capability Analysis
 ================================================================================
 TF Native CC Supported (approx): 12.0
 
@@ -141,7 +142,7 @@ Suggested (destructive) clean reinstall sequence:
     pip install nvmath-python tensorrt
 
 ================================================================================
-CUDA / Library Compatibility Graph
+  CUDA / Library Compatibility Graph
 ================================================================================
 Driver / Toolkit:
   NVIDIA Driver:   581.80
@@ -162,7 +163,7 @@ Use this table with NVIDIA's official compatibility matrix to validate that
 your driver, toolkit, and libraries are aligned for the RTX 5090.
 
 ================================================================================
-Python NVIDIA / CUDA Modules Scan
+  Python NVIDIA / CUDA Modules Scan
 ================================================================================
 Found 14 candidate modules:
   - _cuda_bindings_redirector  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/_cuda_bindings_redirector.py)
@@ -181,7 +182,7 @@ Found 14 candidate modules:
   - triton  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/triton/__init__.py)
 
 ================================================================================
-System CUDA / NVIDIA Shared Libraries
+  System CUDA / NVIDIA Shared Libraries
 ================================================================================
    /usr/lib/x86_64-linux-gnu/libcublas.so
    /usr/lib/x86_64-linux-gnu/libcublas.so.12
@@ -386,78 +387,78 @@ System CUDA / NVIDIA Shared Libraries
    /usr/local/cuda/lib64/libnvrtc_static.alt.a
 
 ================================================================================
-TensorFlow Diagnostics + Stress Suite
+  TensorFlow Diagnostics + Stress Suite
 ================================================================================
 CPUs visible to TF: 1
 GPUs visible to TF: 1
 
 [TF] CPU smoke tests (Conv2D, matmul, gradients)
-✅ CPU Conv2D OK. Time: 3.70 ms
-✅ CPU matmul OK. Time: 5.38 ms
-✅ CPU gradient test OK. Time: 40.44 ms
+✅ CPU Conv2D OK. Time: 3.21 ms
+✅ CPU matmul OK. Time: 5.04 ms
+✅ CPU gradient test OK. Time: 33.23 ms
 
 [TF] GPU smoke tests (Conv2D, matmul, gradients)
 Conv2D output device: /job:localhost/replica:0/task:0/device:GPU:0
-✅ GPU Conv2D OK. Time: 10.90 ms
+✅ GPU Conv2D OK. Time: 9.82 ms
 ✅ GPU matmul OK. Time: 3.46 ms
-✅ GPU gradient test OK. Time: 5.27 ms
+✅ GPU gradient test OK. Time: 5.52 ms
 
 [TF] CPU vs GPU comparison (same shapes):
-  Conv2D: CPU 3.70 ms vs GPU 10.90 ms → 0.3x faster
-  Matmul: CPU 5.38 ms vs GPU 3.46 ms → 1.6x faster
-  Gradient: CPU 40.44 ms vs GPU 5.27 ms → 7.7x faster
+  Conv2D: CPU 3.21 ms vs GPU 9.82 ms → 0.3x faster
+  Matmul: CPU 5.04 ms vs GPU 3.46 ms → 1.5x faster
+  Gradient: CPU 33.23 ms vs GPU 5.52 ms → 6.0x faster
 
 [TF] GPU stress test (adapted, medium) — Conv2D: batch=16, H=W=384, C_in=4, C_out=64; Matmul: 12288 x 12288; Iters=10
 [TF] Conv2D work elements: 150994944 (7.55% of 2,000,000,000 limit)
-  Conv2D stress: 10 iters, total 731.35 ms, avg 73.13 ms/iter
-  Matmul stress: 10 iters, total 1394.31 ms, avg 139.43 ms/iter
+  Conv2D stress: 10 iters, total 735.59 ms, avg 73.56 ms/iter
+  Matmul stress: 10 iters, total 1420.85 ms, avg 142.09 ms/iter
 ✅ TensorFlow GPU stress test (medium) completed without errors.
 
 ================================================================================
-PyTorch Diagnostics + Stress Suite
+  PyTorch Diagnostics + Stress Suite
 ================================================================================
 PyTorch version: 2.9.1+cu128
 PyTorch CUDA version: 12.8
 CUDA available: True
 
 [PyTorch] CPU smoke tests (Conv2d, matmul, gradients)
-✅ CPU Conv2d OK. Time: 53.85 ms
-✅ CPU matmul OK. Time: 38.37 ms
-✅ CPU gradient test OK. Time: 131.52 ms
+✅ CPU Conv2d OK. Time: 31.97 ms
+✅ CPU matmul OK. Time: 24.70 ms
+✅ CPU gradient test OK. Time: 136.97 ms
 
 [PyTorch] Using device: cuda:0
 GPU name: NVIDIA GeForce RTX 5090 Laptop GPU
 GPU capability: (12, 0)
 
 [PyTorch] GPU smoke tests (Conv2d, matmul, gradients)
-✅ GPU Conv2d OK. Time: 29.76 ms
+✅ GPU Conv2d OK. Time: 23.39 ms
 Conv2d output shape: (16, 32, 64, 64)
-✅ GPU matmul OK. Time: 2.71 ms
-✅ GPU gradient test OK. Time: 73.22 ms
+✅ GPU matmul OK. Time: 1.60 ms
+✅ GPU gradient test OK. Time: 55.21 ms
 
 [PyTorch] CPU vs GPU comparison (same shapes):
-  Conv2d: CPU 53.85 ms vs GPU 29.76 ms → 1.8x faster
-  Matmul: CPU 38.37 ms vs GPU 2.71 ms → 14.2x faster
-  Gradient: CPU 131.52 ms vs GPU 73.22 ms → 1.8x faster
+  Conv2d: CPU 31.97 ms vs GPU 23.39 ms → 1.4x faster
+  Matmul: CPU 24.70 ms vs GPU 1.60 ms → 15.4x faster
+  Gradient: CPU 136.97 ms vs GPU 55.21 ms → 2.5x faster
 
 [PyTorch] GPU stress test (adapted, medium) — Conv2d: N=16, C_in=4, H=W=384, C_out=64; Matmul: 12288 x 12288; Iters=10
-  Conv2d stress: 10 iters, total 118.03 ms, avg 11.80 ms/iter
-  Matmul stress: 10 iters, total 1518.59 ms, avg 151.86 ms/iter (dtype=torch.float32, size=12288x12288)
+  Conv2d stress: 10 iters, total 120.27 ms, avg 12.03 ms/iter
+  Matmul stress: 10 iters, total 1520.84 ms, avg 152.08 ms/iter (dtype=torch.float32, size=12288x12288)
 ✅ PyTorch GPU stress test (medium) completed without errors.
 
 ================================================================================
-CuPy Diagnostics + GEMM Benchmark
+  CuPy Diagnostics + GEMM Benchmark
 ================================================================================
 ✅ CuPy sees CUDA device 0: <CUDA Device 0>
 
 [CuPy] fp32 GEMM: 12288 x 12288 @ 12288 x 12288, dtype=<class 'numpy.float32'>
-  Total time: 1484.31 ms (148.43 ms/iter), Rate: 25.00 TFLOP/s
+  Total time: 1470.79 ms (147.08 ms/iter), Rate: 25.23 TFLOP/s
 
 [CuPy] fp16 GEMM: 12288 x 12288 @ 12288 x 12288, dtype=<class 'numpy.float16'>
-  Total time: 411.20 ms (41.12 ms/iter), Rate: 90.25 TFLOP/s
+  Total time: 414.65 ms (41.47 ms/iter), Rate: 89.49 TFLOP/s
 
 ================================================================================
-TensorRT Smoke Test + Micro-Benchmark
+  TensorRT Smoke Test + Micro-Benchmark
 ================================================================================
 TensorRT version: 10.14.1.48.post1
 Using EXPLICIT_BATCH network flag.
@@ -465,12 +466,12 @@ IBuilderConfig type: <class 'tensorrt_bindings.tensorrt.IBuilderConfig'>
 Using set_memory_pool_limit(MemoryPoolType.WORKSPACE, size) API.
 Building a trivial TensorRT identity engine...
 Using builder.build_serialized_network(...) + trt.Runtime().
-✅ Engine build OK. Time: 702.28 ms
+✅ Engine build OK. Time: 500.61 ms
 Running a single inference with PyCUDA for smoke test...
-✅ Inference OK. Time: 0.26 ms
+✅ Inference OK. Time: 0.27 ms
 
 ================================================================================
-GEMM / NVMath Benchmarks (NumPy, PyTorch, NVMath; fp32 + fp16)
+  GEMM / NVMath Benchmarks (NumPy, PyTorch, NVMath; fp32 + fp16)
 ================================================================================
 Matrix size: 12288 x 12288
 Timed iters: 10, Warmup: 3
@@ -481,66 +482,66 @@ Running fp32 GEMM benchmarks
 ================================================================================
 
 [NumPy] GEMM benchmark (CPU) — size=12288x12288, dtype=fp32, iters=10, warmup=3
-  Total time: 23760.66 ms
-  Per-iter time: 2376.07 ms
-  Average rate: 1.56 TFLOP/s
+  Total time: 25375.98 ms
+  Per-iter time: 2537.60 ms
+  Average rate: 1.46 TFLOP/s
 
 [PyTorch] GEMM benchmark on cuda:0 — size=12288x12288, dtype=fp32, iters=10, warmup=3
-  Total time: 1498.46 ms
-  Per-iter time: 149.85 ms
-  Average rate: 24.76 TFLOP/s
+  Total time: 1491.25 ms
+  Per-iter time: 149.13 ms
+  Average rate: 24.88 TFLOP/s
 
 [NVMath] GEMM benchmark via nvmath.linalg.advanced.matmul — size=12288x12288, dtype=fp32, iters=10, warmup=3
-  Total time: 3300.79 ms
-  Per-iter time: 330.08 ms
-  Average rate: 11.24 TFLOP/s
+  Total time: 1502.45 ms
+  Per-iter time: 150.25 ms
+  Average rate: 24.70 TFLOP/s
 
 --------------------------------------------------------------------------------
 fp32 GEMM Summary (TFLOP/s)
 --------------------------------------------------------------------------------
-NumPy (CPU):    1.56 TFLOP/s
-PyTorch (GPU):  24.76 TFLOP/s
-NVMath (GPU):   11.24 TFLOP/s
+NumPy (CPU):    1.46 TFLOP/s
+PyTorch (GPU):  24.88 TFLOP/s
+NVMath (GPU):   24.70 TFLOP/s
 
 ================================================================================
 Running fp16 GEMM benchmarks
 ================================================================================
 
 [NumPy] GEMM benchmark (CPU) — size=12288x12288, dtype=fp32 (CPU baseline for fp16), iters=10, warmup=3
-  Total time: 25656.15 ms
-  Per-iter time: 2565.61 ms
-  Average rate: 1.45 TFLOP/s
+  Total time: 27032.02 ms
+  Per-iter time: 2703.20 ms
+  Average rate: 1.37 TFLOP/s
 
 [PyTorch] GEMM benchmark on cuda:0 — size=12288x12288, dtype=fp16, iters=10, warmup=3
-  Total time: 413.11 ms
-  Per-iter time: 41.31 ms
-  Average rate: 89.83 TFLOP/s
+  Total time: 390.29 ms
+  Per-iter time: 39.03 ms
+  Average rate: 95.08 TFLOP/s
 
 [NVMath] GEMM benchmark via nvmath.linalg.advanced.matmul — size=12288x12288, dtype=fp16, iters=10, warmup=3
-  Total time: 498.65 ms
-  Per-iter time: 49.87 ms
-  Average rate: 74.42 TFLOP/s
+  Total time: 496.18 ms
+  Per-iter time: 49.62 ms
+  Average rate: 74.79 TFLOP/s
 
 --------------------------------------------------------------------------------
 fp16 GEMM Summary (TFLOP/s)
 --------------------------------------------------------------------------------
-NumPy (CPU):    1.45 TFLOP/s
-PyTorch (GPU):  89.83 TFLOP/s
-NVMath (GPU):   74.42 TFLOP/s
+NumPy (CPU):    1.37 TFLOP/s
+PyTorch (GPU):  95.08 TFLOP/s
+NVMath (GPU):   74.79 TFLOP/s
 
 ================================================================================
 Combined GEMM Summary (TFLOP/s)
 ================================================================================
 Backend              fp32         fp16    fp16/fp32
 --------------------------------------------------------------------------------
-NumPy (CPU)  1.56 TFLOP/s 1.45 TFLOP/s        0.93x
-PyTorch      24.76 TFLOP/s 89.83 TFLOP/s        3.63x
-NVMath       11.24 TFLOP/s 74.42 TFLOP/s        6.62x
+NumPy (CPU)  1.46 TFLOP/s 1.37 TFLOP/s        0.94x
+PyTorch      24.88 TFLOP/s 95.08 TFLOP/s        3.82x
+NVMath       24.70 TFLOP/s 74.79 TFLOP/s        3.03x
 
 GEMM benchmarks done.
 
 ================================================================================
-PTXAS Diagnostics
+  PTXAS Diagnostics
 ================================================================================
 ✅ ptxas found at: /usr/local/cuda-12.8/bin/ptxas
 ptxas --version output:
@@ -549,16 +550,16 @@ ptxas --version output:
   Built on Fri_Feb_21_20:21:21_PST_2025
   Cuda compilation tools, release 12.8, V12.8.93
   Build cuda_12.8.r12.8/compiler.35583870_0
-✅ ptxas version query OK. Time: 1.89 ms
+✅ ptxas version query OK. Time: 1.92 ms
 
 ================================================================================
-Resource / Parallelism Suggestion
+  Resource / Parallelism Suggestion
 ================================================================================
 OPTUNA_JOBS=1, MAIN_JOBS=24, CPU_COUNT=24, GPU=True
 =====================================
 
 ================================================================================
-RTX 5090 Optimization Plan
+  RTX 5090 Optimization Plan
 ================================================================================
 Detected GPU[0]: NVIDIA GeForce RTX 5090 Laptop GPU (compute capability=12.0)
 1. Driver / CUDA / cuDNN baseline
@@ -609,40 +610,32 @@ Detected GPU[0]: NVIDIA GeForce RTX 5090 Laptop GPU (compute capability=12.0)
        * PCIe bottlenecks (H2D/D2H transfers overlapping poorly with compute)
 
 ================================================================================
-Summary (Diagnostics + Medium Stress Tests)
+  Summary - Test Results
 ================================================================================
 TensorFlow:
-  Installed:      True
-  GPU available:  True
-  GPU Conv2D OK:  True
-  GPU matmul OK:  True
-  GPU grad OK:    True
-  GPU stress OK:  True
+  ✅ Installed
+  ✅ GPU Available
+  ✅ Conv2D
+  ✅ Matmul
+  ✅ Gradients
+  ✅ Stress Test
 
 PyTorch:
-  Installed:      True
-  GPU available:  True
-  GPU Conv2d OK:  True
-  GPU matmul OK:  True
-  GPU grad OK:    True
-  GPU stress OK:  True
+  ✅ Installed
+  ✅ GPU Available
+  ✅ Conv2d
+  ✅ Matmul
+  ✅ Gradients
+  ✅ Stress Test
 
 CuPy:
-  Installed:      True
-  CUDA available: True
-  fp32 TFLOP/s:   25.000534582841375
-  fp16 TFLOP/s:   90.24532833719647
+  ✅ Installed
+  ✅ CUDA Available | fp32=25.230405429331793 / fp16=89.49303270216829
 
 TensorRT:
-  Installed:      True
-  Engine built:   True
-  Build time ms:  702.275276184082
-  Infer time ms:  0.26035308837890625
+  ✅ Installed
+  ✅ Engine Built | build=500.6067752838135ms / infer=0.2675056457519531ms
 
-PTXAS:
-  (see PTXAS Diagnostics section above for details)
-
-GEMM Benchmarks:
-  (see GEMM / NVMath Benchmarks section above for TFLOP/s results)
-
-Done.
+================================================================================
+✓ Diagnostics Complete
+================================================================================

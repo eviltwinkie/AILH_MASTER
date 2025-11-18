@@ -2337,19 +2337,25 @@ def main() -> None:
             action="store_true",
             help="Skip NumPy CPU baseline in GEMM benchmarks.",
         )
+        parser.add_argument(
+            "--no-smoke-tests",
+            action="store_true",
+            help="Skip smoke tests (functional tests for TF/PyTorch/etc.)",
+        )
         args = parser.parse_args()
 
         gemm_size = args.gemm_size
         gemm_iters = args.gemm_iters
         gemm_warmup = args.gemm_warmup
         use_numpy_gemm = not args.no_numpy_gemm
+        run_smoke_tests = not args.no_smoke_tests and ENABLE_SMOKE_TESTS
 
         print_nvidia_driver()
         print_cuda_path()
-        print_init_nvml()
+        nvml_ok, nvml_handle = print_init_nvml()
         print_cpu_info()
 
-        scan_nvidia_cli_tools()
+        cli_tools = scan_nvidia_cli_tools()
 
         gpu_inventory = print_gpu_capabilities()
         gpu0_info = gpu_inventory[0] if gpu_inventory else None
@@ -2365,15 +2371,24 @@ def main() -> None:
 
         has_gpu = bool(gpus)
 
-        tf_results = run_tensorflow_suite(gpus, gpu0_info)
-        torch_results = run_pytorch_suite(gpu0_info)
+        # Conditionally run smoke tests
+        if run_smoke_tests:
+            tf_results = run_tensorflow_suite(gpus, gpu0_info)
+            torch_results = run_pytorch_suite(gpu0_info)
 
-        cupy_results = run_cupy_suite(
-            n=gemm_size,
-            iters=gemm_iters,
-            warmup=gemm_warmup,
-        )
-        tensorrt_results = run_tensorrt_suite()
+            cupy_results = run_cupy_suite(
+                n=gemm_size,
+                iters=gemm_iters,
+                warmup=gemm_warmup,
+            )
+            tensorrt_results = run_tensorrt_suite()
+        else:
+            hr("Smoke Tests Skipped")
+            print_status(True, "Smoke tests disabled (--no-smoke-tests or GPU_SMOKE_TESTS=0)")
+            tf_results = {"installed": tf is not None}
+            torch_results = {"installed": torch is not None}
+            cupy_results = {"installed": cp is not None}
+            tensorrt_results = {"installed": trt is not None}
 
         # GEMM benchmarks (NumPy / PyTorch / NVMath)
         if not args.no_gemm:
@@ -2395,41 +2410,50 @@ def main() -> None:
             tensorrt_present=('trt' in globals() and trt is not None),
         )
 
-        hr("Summary (Diagnostics + Medium Stress Tests)")
+        hr("Summary - Test Results")
+        
+        def format_result(label: str, success: bool, details: str = "") -> str:
+            sym = SUCCESS_SYMBOL if success else FAILURE_SYMBOL
+            msg = f"  {sym} {label}"
+            if details:
+                msg += f" | {details}"
+            return msg
+        
         print("TensorFlow:")
-        print(f"  Installed:      {tf_results.get('installed')}")
-        print(f"  GPU available:  {tf_results.get('gpu_available')}")
-        print(f"  GPU Conv2D OK:  {tf_results.get('gpu_conv_ok')}")
-        print(f"  GPU matmul OK:  {tf_results.get('gpu_matmul_ok')}")
-        print(f"  GPU grad OK:    {tf_results.get('gpu_grad_ok')}")
-        print(f"  GPU stress OK:  {tf_results.get('gpu_stress_ok')}")
+        print(format_result("Installed", tf_results.get('installed', False)))
+        if run_smoke_tests:
+            print(format_result("GPU Available", tf_results.get('gpu_available', False)))
+            print(format_result("Conv2D", tf_results.get('gpu_conv_ok', False)))
+            print(format_result("Matmul", tf_results.get('gpu_matmul_ok', False)))
+            print(format_result("Gradients", tf_results.get('gpu_grad_ok', False)))
+            print(format_result("Stress Test", tf_results.get('gpu_stress_ok', False)))
 
         print("\nPyTorch:")
-        print(f"  Installed:      {torch_results.get('installed')}")
-        print(f"  GPU available:  {torch_results.get('gpu_available')}")
-        print(f"  GPU Conv2d OK:  {torch_results.get('gpu_conv_ok')}")
-        print(f"  GPU matmul OK:  {torch_results.get('gpu_matmul_ok')}")
-        print(f"  GPU grad OK:    {torch_results.get('gpu_grad_ok')}")
-        print(f"  GPU stress OK:  {torch_results.get('gpu_stress_ok')}")
+        print(format_result("Installed", torch_results.get('installed', False)))
+        if run_smoke_tests:
+            print(format_result("GPU Available", torch_results.get('gpu_available', False)))
+            print(format_result("Conv2d", torch_results.get('gpu_conv_ok', False)))
+            print(format_result("Matmul", torch_results.get('gpu_matmul_ok', False)))
+            print(format_result("Gradients", torch_results.get('gpu_grad_ok', False)))
+            print(format_result("Stress Test", torch_results.get('gpu_stress_ok', False)))
 
         print("\nCuPy:")
-        print(f"  Installed:      {cupy_results.get('installed')}")
-        print(f"  CUDA available: {cupy_results.get('cuda_available')}")
-        print(f"  fp32 TFLOP/s:   {cupy_results.get('fp32_tflops')}")
-        print(f"  fp16 TFLOP/s:   {cupy_results.get('fp16_tflops')}")
+        print(format_result("Installed", cupy_results.get('installed', False)))
+        if run_smoke_tests and cupy_results.get('cuda_available'):
+            fps32 = cupy_results.get('fp32_tflops', 'N/A')
+            fps16 = cupy_results.get('fp16_tflops', 'N/A')
+            print(format_result("CUDA Available", True, f"fp32={fps32} / fp16={fps16}"))
 
         print("\nTensorRT:")
-        print(f"  Installed:      {tensorrt_results.get('installed')}")
-        print(f"  Engine built:   {tensorrt_results.get('engine_built')}")
-        print(f"  Build time ms:  {tensorrt_results.get('build_time_ms')}")
-        print(f"  Infer time ms:  {tensorrt_results.get('inference_time_ms')}")
-
-        print("\nPTXAS:")
-        print("  (see PTXAS Diagnostics section above for details)")
-        if not args.no_gemm:
-            print("\nGEMM Benchmarks:")
-            print("  (see GEMM / NVMath Benchmarks section above for TFLOP/s results)")
-        print("\nDone.")
+        print(format_result("Installed", tensorrt_results.get('installed', False)))
+        if run_smoke_tests and tensorrt_results.get('engine_built'):
+            build_ms = tensorrt_results.get('build_time_ms', 'N/A')
+            infer_ms = tensorrt_results.get('inference_time_ms', 'N/A')
+            print(format_result("Engine Built", True, f"build={build_ms}ms / infer={infer_ms}ms"))
+        
+        print("\n" + "=" * 80)
+        print("✓ Diagnostics Complete")
+        print("=" * 80)
         
     finally:
         # Restore stdout and close file
