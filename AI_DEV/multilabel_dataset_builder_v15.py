@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+# Creates labels from the folder structure
+
 import os
 import gc
 import json
