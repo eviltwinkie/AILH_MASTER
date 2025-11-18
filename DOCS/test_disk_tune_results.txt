@@ -1,0 +1,44 @@
+======================================================================
+SMALL-FILE DISK READ AUTO-TUNER RESULTS
+======================================================================
+
+STORAGE CONTEXT
+----------------------------------------------------------------------
+Mount Point:   /
+Filesystem:    ext4
+Device:        /dev/sdd
+Block Name:    N/A
+Mount Options: noatime=False, relatime=True
+
+DATASET SELECTION
+----------------------------------------------------------------------
+Root Path:     /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_DEV
+Pattern:       *.wav
+Size Range:    60000 - 120000 bytes
+Limit:         None
+
+BEST CONFIGURATION (by warm-cache throughput)
+----------------------------------------------------------------------
+Threads:       6
+Buffer Size:   131072 bytes
+Read Method:   osread
+Fadvise Hint:  NONE
+Use O_NOATIME: True
+Max Inflight:  16
+Files/Task:    768
+
+PERFORMANCE METRICS
+----------------------------------------------------------------------
+Files/Second:  24801.7 ±790.317 files/s
+Latency:       0.040 ±0.001 ms/file
+Throughput:    2032.8 ±64.778 MB/s
+Trials:        4 runs
+
+RUNNER-UP CONFIGURATION
+----------------------------------------------------------------------
+Config: threads=5 bufsize=262144 method=osread inflight=16
+Performance: 24692.3 files/s, 2023.9 MB/s
+
+======================================================================
+Generated: 2025-11-18 05:41:48
+======================================================================
