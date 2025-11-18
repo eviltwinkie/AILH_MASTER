@@ -155,7 +155,7 @@ sensor_id~recording_id~timestamp~gain_db.wav
 - Gain range: 0-200dB (1dB indicates hydrophone not touching water)
 
 #### 2. Data Specifications
-- **Sample Rate**: 4096 Hz (REQUIRED for upscaling to 8192 Hz)
+- **Sample Rate**: 4096 Hz (REQUIRED to upscale to 8192 Hz)
 - **Sample Duration**: 10 seconds
 - **File Format**: WAV (normalized, but verify)
 - **Default Dataset Size**: 4096 10-second WAV files
@@ -188,17 +188,9 @@ All scripts MUST support:
 
 ### Classification Categories
 
-⚠️ **CRITICAL**: Active label set (feature branch):
-```python
-DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
-```
+**CRITICAL**: Active label set:
 
-Main branch uses 6 categories:
-```python
 DATA_LABELS = ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
-```
-
-**Ensure your MASTER_DATASET matches the active label set before training!**
 
 ### Dataset Split
 - **MASTER_DATASET**: 100% - Source of truth (manually labeled)
