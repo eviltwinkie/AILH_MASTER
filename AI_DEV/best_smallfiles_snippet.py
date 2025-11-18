@@ -6,13 +6,13 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Tuned knobs
-BEST_THREADS        = 5
-BEST_BUFSIZE        = 131072
+BEST_THREADS        = 6
+BEST_BUFSIZE        = 65536
 BEST_METHOD         = "osread"
 BEST_FADVISE        = "NONE"
 BEST_USE_NOATIME    = True
-BEST_MAX_INFLIGHT   = 16
-BEST_FILES_PER_TASK = 128
+BEST_MAX_INFLIGHT   = 0
+BEST_FILES_PER_TASK = 768
 
 # Dataset selection (documenting what the tuner used)
 BEST_ROOT    = r"/DEVELOPMENT/ROOT_AILH/DATA_STORE/TRAINING"

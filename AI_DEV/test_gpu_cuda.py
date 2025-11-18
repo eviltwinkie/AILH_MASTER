@@ -31,9 +31,17 @@ CLI:
 
 import os
 
-# ----------------------------------------------------------------------
-# Environment: must be set BEFORE ANY TensorFlow / Keras import
-# ----------------------------------------------------------------------
+# Config for output file
+OUTPUT_FILE = os.environ.get("GPU_DIAG_OUTPUT", "gpu_diagnostic_results.txt")
+
+# Smoke testing configuration
+ENABLE_SMOKE_TESTS = os.environ.get("GPU_SMOKE_TESTS", "1").lower() in ("1", "true", "yes", "on")
+
+# Status symbols
+SUCCESS_SYMBOL = "✅"
+FAILURE_SYMBOL = "❌"
+WARNING_SYMBOL = "⚠️"
+INFO_SYMBOL = "ℹ️"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"   # disable oneDNN
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"    # 0=all, 1=INFO, 2=WARNING, 3=ERROR
 
@@ -175,16 +183,28 @@ GEMM_WARMUP_DEFAULT = 3
 # =============================================================================
 
 def hr(title: str) -> None:
+    """Print a formatted section header."""
     print("\n" + "=" * 80)
-    print(title)
+    print(f"  {title}")
     print("=" * 80)
 
+def status_msg(success: bool, message: str, details: str = "") -> str:
+    """Format a status message with success/failure indicator."""
+    symbol = SUCCESS_SYMBOL if success else FAILURE_SYMBOL
+    msg = f"{symbol} {message}"
+    if details:
+        msg += f"\n    {details}"
+    return msg
+
+def print_status(success: bool, message: str, details: str = "") -> None:
+    """Print a status message."""
+    print(status_msg(success, message, details))
 
 def which(cmd: str) -> Optional[str]:
     return shutil.which(cmd)
 
-
 def run_cmd(cmd: List[str]) -> Optional[str]:
+    """Run a command and return output, or None on failure."""
     try:
         return subprocess.check_output(
             cmd,
@@ -193,7 +213,6 @@ def run_cmd(cmd: List[str]) -> Optional[str]:
         )
     except Exception:
         return None
-
 
 def human_tflops(flops_per_second: float) -> str:
     """Format FLOPs/s into TFLOP/s with 2 decimals."""
@@ -474,92 +493,94 @@ def run_tensorrt_suite() -> Dict[str, Any]:
 # SYSTEM / DRIVER / CPU / CUDA PATH
 # =============================================================================
 
-def print_nvidia_driver() -> None:
+def print_nvidia_driver() -> bool:
+    """Print NVIDIA driver version. Returns success status."""
     hr("NVIDIA Driver")
     out = run_cmd(["nvidia-smi"])
     if not out:
-        print("nvidia-smi not found or driver unavailable.")
-        return
+        print_status(False, "nvidia-smi not found or driver unavailable")
+        return False
+    
     for line in out.splitlines():
         if "Driver Version" in line:
-            print(line.strip())
-            return
-    print("Driver version not detected in nvidia-smi output.")
+            version = line.strip()
+            print_status(True, version)
+            return True
+    
+    print_status(False, "Driver version not detected in nvidia-smi output")
+    return False
 
 def print_init_nvml():
-    hr("NVML Detection")
+    """Initialize NVML and return device handle. Returns (success: bool, handle)."""
+    hr("NVML Initialization")
     try:
         import pynvml
         pynvml.nvmlInit()
-
         lib = pynvml.nvmlSystemGetNVMLVersion()
-        print(f"[INFO] NVML initialized: version {lib}")
-
-        return pynvml.nvmlDeviceGetHandleByIndex(0)
+        print_status(True, f"NVML initialized: version {lib}")
+        return True, pynvml.nvmlDeviceGetHandleByIndex(0)
     except Exception as e:
-        print(f"[WARN] NVML unavailable: {e}")
-        return None
+        print_status(False, f"NVML unavailable: {e}")
+        return False, None
 
 def print_cpu_info() -> None:
+    """Print CPU information."""
     hr("CPU Diagnostics")
-    print(f"CPU cores: {os.cpu_count() or 1}")
-    print(f"Architecture: {platform.machine()}")
-    print(f"Processor string: {platform.processor()}")
+    cores = os.cpu_count() or 1
+    arch = platform.machine()
+    proc = platform.processor()
+    print(f"  Cores:       {cores}")
+    print(f"  Architecture: {arch}")
+    print(f"  Processor:   {proc or '(unknown)'}")
+    
     if cpuinfo:
-        info = cpuinfo.get_cpu_info()
-        print(f"CPU brand: {info.get('brand_raw', 'Unknown')}")
-        print(f"CPU bits:  {info.get('bits', 'Unknown')}")
+        try:
+            info = cpuinfo.get_cpu_info()
+            brand = info.get('brand_raw', 'Unknown')
+            bits = info.get('bits', 'Unknown')
+            print(f"  Brand:       {brand}")
+            print(f"  Bits:        {bits}")
+        except Exception as e:
+            print_status(False, f"Failed to get detailed CPU info: {e}")
     else:
-        print("Install 'py-cpuinfo' for detailed CPU info (pip install py-cpuinfo).")
-
+        print_status(False, "py-cpuinfo not installed (pip install py-cpuinfo)")
 
 def print_cuda_path() -> None:
+    """Print CUDA directories in PATH."""
     hr("CUDA PATH Check")
-    found = False
-    for p in os.environ.get("PATH", "").split(os.pathsep):
-        if "cuda" in p.lower():
-            print("  ", p)
-            found = True
-    if not found:
-        print("No CUDA directories found in PATH.")
+    cuda_paths = [p for p in os.environ.get("PATH", "").split(os.pathsep) if "cuda" in p.lower()]
+    if cuda_paths:
+        for p in cuda_paths:
+            print(f"  {p}")
+        print_status(True, f"Found {len(cuda_paths)} CUDA directories in PATH")
+    else:
+        print_status(False, "No CUDA directories found in PATH")
 
 # =============================================================================
 # NVIDIA CLI TOOLS SCANNER
 # =============================================================================
 
-def scan_nvidia_cli_tools() -> None:
+def scan_nvidia_cli_tools() -> Dict[str, bool]:
     """
-    Check PATH for useful NVIDIA / CUDA CLI tools:
-
-      - nvidia-smi
-      - nvcc
-      - ptxas
-      - cuda-gdb
-      - cuda-memcheck
-      - ncu (Nsight Compute CLI)
-      - nsys (Nsight Systems CLI)
-      - nsight-sys, nsight-compute (desktop launchers, if on PATH)
+    Check PATH for useful NVIDIA / CUDA CLI tools.
+    Returns dict of tool_name -> found (bool).
     """
     hr("NVIDIA CLI Tools on PATH")
 
     tools = [
-        "nvidia-smi",
-        "nvcc",
-        "ptxas",
-        "cuda-gdb",
-        "cuda-memcheck",
-        "ncu",
-        "nsys",
-        "nsight-sys",
-        "nsight-compute",
+        "nvidia-smi", "nvcc", "ptxas", "cuda-gdb",
+        "cuda-memcheck", "ncu", "nsys", "nsight-sys", "nsight-compute",
     ]
 
+    found_tools = {}
     for t in tools:
         path = which(t)
-        if path:
-            print(f"  {t:15s} -> {path}")
-        else:
-            print(f"  {t:15s} -> (not found in PATH)")
+        found = path is not None
+        found_tools[t] = found
+        status = f"-> {path}" if path else "(not found)"
+        print(f"  {t:15s} {status}")
+    
+    return found_tools
 
 # =============================================================================
 # PYTHON-LEVEL NVIDIA / CUDA MODULE SCANNER
@@ -2258,133 +2279,163 @@ def print_resources(has_gpu: bool) -> None:
 
 
 def main() -> None:
-    hr("Python Interpreter Info")
-    print("sys.executable:", sys.executable)
-    print("sys.version:", sys.version.replace("\n", " "))
-    parser = argparse.ArgumentParser(
-        description="GPU diagnostics + TF/PTXAS + PyTorch + NVMath GEMM benchmarks"
-    )
-    parser.add_argument(
-        "--gemm-size",
-        type=int,
-        default=GEMM_SIZE_DEFAULT,
-        help=f"GEMM size n for n x n matrices in GEMM benchmarks (default: {GEMM_SIZE_DEFAULT})",
-    )
-    parser.add_argument(
-        "--gemm-iters",
-        type=int,
-        default=GEMM_ITERS_DEFAULT,
-        help=f"Timed iterations per backend per dtype in GEMM benchmarks (default: {GEMM_ITERS_DEFAULT})",
-    )
-    parser.add_argument(
-        "--gemm-warmup",
-        type=int,
-        default=GEMM_WARMUP_DEFAULT,
-        help=f"Warmup iterations per backend per dtype in GEMM benchmarks (default: {GEMM_WARMUP_DEFAULT})",
-    )
-    parser.add_argument(
-        "--no-gemm",
-        action="store_true",
-        help="Skip the NVMath/PyTorch/NumPy GEMM benchmarks section.",
-    )
-    parser.add_argument(
-        "--no-numpy-gemm",
-        action="store_true",
-        help="Skip NumPy CPU baseline in GEMM benchmarks.",
-    )
-    args = parser.parse_args()
+    """Main diagnostics function with text file output."""
+    # Create a file handle for logging
+    output_file = open(OUTPUT_FILE, "w")
+    original_stdout = sys.stdout
+    
+    class TeeOutput:
+        """Redirect stdout to both console and file."""
+        def __init__(self, console, file):
+            self.console = console
+            self.file = file
+        
+        def write(self, message: str) -> None:
+            self.console.write(message)
+            self.file.write(message)
+            self.file.flush()
+        
+        def flush(self) -> None:
+            self.console.flush()
+            self.file.flush()
+    
+    # Redirect stdout to capture all output
+    sys.stdout = TeeOutput(original_stdout, output_file)
+    
+    try:
+        hr("Python Interpreter Info")
+        print("sys.executable:", sys.executable)
+        print("sys.version:", sys.version.replace("\n", " "))
+        parser = argparse.ArgumentParser(
+            description="GPU diagnostics + TF/PTXAS + PyTorch + NVMath GEMM benchmarks"
+        )
+        parser.add_argument(
+            "--gemm-size",
+            type=int,
+            default=GEMM_SIZE_DEFAULT,
+            help=f"GEMM size n for n x n matrices in GEMM benchmarks (default: {GEMM_SIZE_DEFAULT})",
+        )
+        parser.add_argument(
+            "--gemm-iters",
+            type=int,
+            default=GEMM_ITERS_DEFAULT,
+            help=f"Timed iterations per backend per dtype in GEMM benchmarks (default: {GEMM_ITERS_DEFAULT})",
+        )
+        parser.add_argument(
+            "--gemm-warmup",
+            type=int,
+            default=GEMM_WARMUP_DEFAULT,
+            help=f"Warmup iterations per backend per dtype in GEMM benchmarks (default: {GEMM_WARMUP_DEFAULT})",
+        )
+        parser.add_argument(
+            "--no-gemm",
+            action="store_true",
+            help="Skip the NVMath/PyTorch/NumPy GEMM benchmarks section.",
+        )
+        parser.add_argument(
+            "--no-numpy-gemm",
+            action="store_true",
+            help="Skip NumPy CPU baseline in GEMM benchmarks.",
+        )
+        args = parser.parse_args()
 
-    gemm_size = args.gemm_size
-    gemm_iters = args.gemm_iters
-    gemm_warmup = args.gemm_warmup
-    use_numpy_gemm = not args.no_numpy_gemm
+        gemm_size = args.gemm_size
+        gemm_iters = args.gemm_iters
+        gemm_warmup = args.gemm_warmup
+        use_numpy_gemm = not args.no_numpy_gemm
 
-    print_nvidia_driver()
-    print_cuda_path()
-    print_init_nvml()
-    print_cpu_info()
+        print_nvidia_driver()
+        print_cuda_path()
+        print_init_nvml()
+        print_cpu_info()
 
-    scan_nvidia_cli_tools()
+        scan_nvidia_cli_tools()
 
-    gpu_inventory = print_gpu_capabilities()
-    gpu0_info = gpu_inventory[0] if gpu_inventory else None
+        gpu_inventory = print_gpu_capabilities()
+        gpu0_info = gpu_inventory[0] if gpu_inventory else None
 
-    gpus = print_tf_gpus()
-    print_tf_info()
-    analyze_gpu(gpus)
+        gpus = print_tf_gpus()
+        print_tf_info()
+        analyze_gpu(gpus)
 
-    print_cuda_compatibility_graph(gpu_inventory)
+        print_cuda_compatibility_graph(gpu_inventory)
 
-    scan_python_nvidia_modules()
-    scan_system_cuda_libs()
+        scan_python_nvidia_modules()
+        scan_system_cuda_libs()
 
-    has_gpu = bool(gpus)
+        has_gpu = bool(gpus)
 
-    tf_results = run_tensorflow_suite(gpus, gpu0_info)
-    torch_results = run_pytorch_suite(gpu0_info)
+        tf_results = run_tensorflow_suite(gpus, gpu0_info)
+        torch_results = run_pytorch_suite(gpu0_info)
 
-    cupy_results = run_cupy_suite(
-        n=gemm_size,
-        iters=gemm_iters,
-        warmup=gemm_warmup,
-    )
-    tensorrt_results = run_tensorrt_suite()
-
-    # GEMM benchmarks (NumPy / PyTorch / NVMath)
-    if not args.no_gemm:
-        run_gemm_benchmarks(
+        cupy_results = run_cupy_suite(
             n=gemm_size,
             iters=gemm_iters,
             warmup=gemm_warmup,
-            use_numpy=use_numpy_gemm,
+        )
+        tensorrt_results = run_tensorrt_suite()
+
+        # GEMM benchmarks (NumPy / PyTorch / NVMath)
+        if not args.no_gemm:
+            run_gemm_benchmarks(
+                n=gemm_size,
+                iters=gemm_iters,
+                warmup=gemm_warmup,
+                use_numpy=use_numpy_gemm,
+            )
+
+        test_ptxas()
+        print_resources(has_gpu)
+
+        print_rtx5090_optimization_plan(
+            gpu_inventory=gpu_inventory,
+            tf_present=(tf is not None),
+            torch_present=(torch is not None),
+            cupy_present=('cp' in globals() and cp is not None),
+            tensorrt_present=('trt' in globals() and trt is not None),
         )
 
-    test_ptxas()
-    print_resources(has_gpu)
+        hr("Summary (Diagnostics + Medium Stress Tests)")
+        print("TensorFlow:")
+        print(f"  Installed:      {tf_results.get('installed')}")
+        print(f"  GPU available:  {tf_results.get('gpu_available')}")
+        print(f"  GPU Conv2D OK:  {tf_results.get('gpu_conv_ok')}")
+        print(f"  GPU matmul OK:  {tf_results.get('gpu_matmul_ok')}")
+        print(f"  GPU grad OK:    {tf_results.get('gpu_grad_ok')}")
+        print(f"  GPU stress OK:  {tf_results.get('gpu_stress_ok')}")
 
-    print_rtx5090_optimization_plan(
-        gpu_inventory=gpu_inventory,
-        tf_present=(tf is not None),
-        torch_present=(torch is not None),
-        cupy_present=('cp' in globals() and cp is not None),
-        tensorrt_present=('trt' in globals() and trt is not None),
-    )
+        print("\nPyTorch:")
+        print(f"  Installed:      {torch_results.get('installed')}")
+        print(f"  GPU available:  {torch_results.get('gpu_available')}")
+        print(f"  GPU Conv2d OK:  {torch_results.get('gpu_conv_ok')}")
+        print(f"  GPU matmul OK:  {torch_results.get('gpu_matmul_ok')}")
+        print(f"  GPU grad OK:    {torch_results.get('gpu_grad_ok')}")
+        print(f"  GPU stress OK:  {torch_results.get('gpu_stress_ok')}")
 
-    hr("Summary (Diagnostics + Medium Stress Tests)")
-    print("TensorFlow:")
-    print(f"  Installed:      {tf_results.get('installed')}")
-    print(f"  GPU available:  {tf_results.get('gpu_available')}")
-    print(f"  GPU Conv2D OK:  {tf_results.get('gpu_conv_ok')}")
-    print(f"  GPU matmul OK:  {tf_results.get('gpu_matmul_ok')}")
-    print(f"  GPU grad OK:    {tf_results.get('gpu_grad_ok')}")
-    print(f"  GPU stress OK:  {tf_results.get('gpu_stress_ok')}")
+        print("\nCuPy:")
+        print(f"  Installed:      {cupy_results.get('installed')}")
+        print(f"  CUDA available: {cupy_results.get('cuda_available')}")
+        print(f"  fp32 TFLOP/s:   {cupy_results.get('fp32_tflops')}")
+        print(f"  fp16 TFLOP/s:   {cupy_results.get('fp16_tflops')}")
 
-    print("\nPyTorch:")
-    print(f"  Installed:      {torch_results.get('installed')}")
-    print(f"  GPU available:  {torch_results.get('gpu_available')}")
-    print(f"  GPU Conv2d OK:  {torch_results.get('gpu_conv_ok')}")
-    print(f"  GPU matmul OK:  {torch_results.get('gpu_matmul_ok')}")
-    print(f"  GPU grad OK:    {torch_results.get('gpu_grad_ok')}")
-    print(f"  GPU stress OK:  {torch_results.get('gpu_stress_ok')}")
+        print("\nTensorRT:")
+        print(f"  Installed:      {tensorrt_results.get('installed')}")
+        print(f"  Engine built:   {tensorrt_results.get('engine_built')}")
+        print(f"  Build time ms:  {tensorrt_results.get('build_time_ms')}")
+        print(f"  Infer time ms:  {tensorrt_results.get('inference_time_ms')}")
 
-    print("\nCuPy:")
-    print(f"  Installed:      {cupy_results.get('installed')}")
-    print(f"  CUDA available: {cupy_results.get('cuda_available')}")
-    print(f"  fp32 TFLOP/s:   {cupy_results.get('fp32_tflops')}")
-    print(f"  fp16 TFLOP/s:   {cupy_results.get('fp16_tflops')}")
-
-    print("\nTensorRT:")
-    print(f"  Installed:      {tensorrt_results.get('installed')}")
-    print(f"  Engine built:   {tensorrt_results.get('engine_built')}")
-    print(f"  Build time ms:  {tensorrt_results.get('build_time_ms')}")
-    print(f"  Infer time ms:  {tensorrt_results.get('inference_time_ms')}")
-
-    print("\nPTXAS:")
-    print("  (see PTXAS Diagnostics section above for details)")
-    if not args.no_gemm:
-        print("\nGEMM Benchmarks:")
-        print("  (see GEMM / NVMath Benchmarks section above for TFLOP/s results)")
-    print("\nDone.")
+        print("\nPTXAS:")
+        print("  (see PTXAS Diagnostics section above for details)")
+        if not args.no_gemm:
+            print("\nGEMM Benchmarks:")
+            print("  (see GEMM / NVMath Benchmarks section above for TFLOP/s results)")
+        print("\nDone.")
+        
+    finally:
+        # Restore stdout and close file
+        sys.stdout = original_stdout
+        output_file.close()
+        print(f"\n📄 Full diagnostic results saved to: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()

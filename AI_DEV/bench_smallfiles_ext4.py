@@ -98,7 +98,7 @@ class Config:
     MAX_BYTES   = _env_int("SFA_MAX_BYTES", 120000)
     LIMIT       = _env_int("SFA_LIMIT", 0)                    # 0 = no limit
     SHUFFLE     = _env_bool("SFA_SHUFFLE", True)
-    TRIALS      = 1
+    TRIALS      = 2
     
     # ---- Search spaces (coarse) ----
     THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [5])
@@ -116,8 +116,8 @@ class Config:
 
 
     # ---- Rounds ----
-    ROUNDS      = _env_int("SFA_ROUNDS", 2)       # warm-cache repeats per combo
-    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", 0)  # optional cold-ish rounds (per-file DONTNEED)
+    ROUNDS      = _env_int("SFA_ROUNDS", 5)       # warm-cache repeats per combo
+    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", 5)  # optional cold-ish rounds (per-file DONTNEED)
     TRUE_COLD   = _env_bool("SFA_TRUE_COLD", False)
 
     # ---- Latency recording ----
@@ -126,6 +126,7 @@ class Config:
     # ---- Output artifacts ----
     CSV_FILE     = os.environ.get("SFA_CSV", "smallfile_autotune_results.csv")
     BEST_JSON    = os.environ.get("SFA_BEST_JSON", "best_smallfiles.json")
+    BEST_TEXT    = os.environ.get("SFA_BEST_TEXT", "best_smallfiles_results.txt")
     BEST_SNIPPET = os.environ.get("SFA_BEST_SNIPPET", "best_smallfiles_snippet.py")
 
 # ---------- Constants ----------
@@ -1048,13 +1049,96 @@ def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[st
     with open(Config.BEST_JSON, "w") as f:
         json.dump(chosen, f, indent=2)
     _write_best_snippet(chosen)
+    _write_best_text(chosen, ctx, fine_ranked)
 
     print("\n=== BEST (warm, by files/sec) ===")
     print(json.dumps(chosen, indent=2))
     print(f"\nResults CSV: {Config.CSV_FILE}")
     print(f"Best JSON  : {Config.BEST_JSON}")
+    print(f"Best Text  : {Config.BEST_TEXT}")
     print(f"Snippet    : {Config.BEST_SNIPPET}")
     return chosen
+
+# ---------- Results output functions ----------
+def _write_best_text(best: Dict[str, Any], storage_context: Dict[str, Any], 
+                     fine_ranked: List[Dict[str, Any]]) -> None:
+    """
+    Write formatted benchmark results to a text file.
+    
+    Args:
+        best: Best configuration dictionary
+        storage_context: Storage system information
+        fine_ranked: Ranked list of configurations from fine search
+    """
+    try:
+        with open(Config.BEST_TEXT, "w") as f:
+            f.write("="*70 + "\n")
+            f.write("SMALL-FILE DISK READ AUTO-TUNER RESULTS\n")
+            f.write("="*70 + "\n\n")
+            
+            # Storage context
+            f.write("STORAGE CONTEXT\n")
+            f.write("-" * 70 + "\n")
+            f.write(f"Mount Point:   {storage_context.get('mount_point', 'N/A')}\n")
+            f.write(f"Filesystem:    {storage_context.get('fstype', 'N/A')}\n")
+            f.write(f"Device:        {storage_context.get('device', 'N/A')}\n")
+            f.write(f"Block Name:    {storage_context.get('block', 'N/A')}\n")
+            f.write(f"Mount Options: noatime={storage_context.get('noatime', 'N/A')}, "
+                   f"relatime={storage_context.get('relatime', 'N/A')}\n\n")
+            
+            # Dataset info
+            f.write("DATASET SELECTION\n")
+            f.write("-" * 70 + "\n")
+            f.write(f"Root Path:     {best['root']}\n")
+            f.write(f"Pattern:       {best['pattern']}\n")
+            f.write(f"Size Range:    {best['min_bytes']} - {best['max_bytes']} bytes\n")
+            f.write(f"Limit:         {best['limit'] or 'None'}\n\n")
+            
+            # Best configuration
+            f.write("BEST CONFIGURATION (by warm-cache throughput)\n")
+            f.write("-" * 70 + "\n")
+            f.write(f"Threads:       {best['threads']}\n")
+            f.write(f"Buffer Size:   {best['bufsize']} bytes\n")
+            f.write(f"Read Method:   {best['method']}\n")
+            f.write(f"Fadvise Hint:  {best['fadvise'] or 'NONE'}\n")
+            f.write(f"Use O_NOATIME: {best['use_noatime']}\n")
+            f.write(f"Max Inflight:  {best['max_inflight'] or 'Unlimited'}\n")
+            f.write(f"Files/Task:    {best['files_per_task']}\n\n")
+            
+            # Performance metrics
+            if fine_ranked:
+                f.write("PERFORMANCE METRICS\n")
+                f.write("-" * 70 + "\n")
+                best_entry = fine_ranked[0]
+                m, s = best_entry["meta"], best_entry["means"]
+                
+                sd_f = (f" ±{s['files_per_s_sd']:.3f}" if s.get('files_per_s_sd') is not None else "")
+                sd_a = (f" ±{s['avg_ms_sd']:.3f}" if s.get('avg_ms_sd') is not None else "")
+                sd_m = (f" ±{s['mbps_sd']:.3f}" if s.get('mbps_sd') is not None else "")
+                
+                f.write(f"Files/Second:  {s.get('files_per_s', 0):.1f}{sd_f} files/s\n")
+                f.write(f"Latency:       {s.get('avg_ms', 0):.3f}{sd_a} ms/file\n")
+                f.write(f"Throughput:    {s.get('mbps', 0):.1f}{sd_m} MB/s\n")
+                f.write(f"Trials:        {s.get('count', 0)} runs\n\n")
+                
+                # Runner-up if available
+                if len(fine_ranked) > 1:
+                    f.write("RUNNER-UP CONFIGURATION\n")
+                    f.write("-" * 70 + "\n")
+                    runner = fine_ranked[1]
+                    m2, s2 = runner["meta"], runner["means"]
+                    f.write(f"Config: threads={m2['threads']} bufsize={m2['bufsize']} "
+                           f"method={m2['method']} inflight={m2['max_inflight']}\n")
+                    f.write(f"Performance: {s2.get('files_per_s', 0):.1f} files/s, "
+                           f"{s2.get('mbps', 0):.1f} MB/s\n\n")
+            
+            f.write("="*70 + "\n")
+            f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("="*70 + "\n")
+        
+        logger.info(f"Results written to: {Config.BEST_TEXT}")
+    except Exception as e:
+        logger.error(f"Failed to write text results: {e}")
 
 # ---------- Production snippet emitter ----------
 def _write_best_snippet(best: dict):

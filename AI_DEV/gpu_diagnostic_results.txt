@@ -1,0 +1,648 @@
+
+================================================================================
+Python Interpreter Info
+================================================================================
+sys.executable: /home/emartinez/venvs/mlenv/bin/python3
+sys.version: 3.12.3 (main, Aug 14 2025, 17:47:21) [GCC 13.3.0]
+
+================================================================================
+NVIDIA Driver
+================================================================================
+| NVIDIA-SMI 580.105.07             Driver Version: 581.80         CUDA Version: 13.0     |
+
+================================================================================
+CUDA PATH Check
+================================================================================
+   /usr/local/cuda-12.8/bin
+
+================================================================================
+NVML Detection
+================================================================================
+[INFO] NVML initialized: version 13.580.105.07
+
+================================================================================
+CPU Diagnostics
+================================================================================
+CPU cores: 24
+Architecture: x86_64
+Processor string: x86_64
+CPU brand: Intel(R) Core(TM) Ultra 9 275HX
+CPU bits:  64
+
+================================================================================
+NVIDIA CLI Tools on PATH
+================================================================================
+  nvidia-smi      -> /usr/lib/wsl/lib/nvidia-smi
+  nvcc            -> /usr/local/cuda-12.8/bin/nvcc
+  ptxas           -> /usr/local/cuda-12.8/bin/ptxas
+  cuda-gdb        -> /usr/local/cuda-12.8/bin/cuda-gdb
+  cuda-memcheck   -> (not found in PATH)
+  ncu             -> /usr/local/cuda-12.8/bin/ncu
+  nsys            -> /usr/local/cuda-12.8/bin/nsys
+  nsight-sys      -> /usr/local/cuda-12.8/bin/nsight-sys
+  nsight-compute  -> (not found in PATH)
+
+================================================================================
+GPU Capabilities / Inventory
+================================================================================
+nvidia-smi GPU inventory:
+
+GPU[0] NVIDIA GeForce RTX 5090 Laptop GPU
+  UUID:         GPU-2dbeb483-0e15-2a04-74d8-5a76912d353b
+  Compute Cap:  12.0
+  PCI Bus ID:   00000000:02:00.0
+  Driver Ver:   581.80
+  Memory Total: 24463 MiB
+  Memory Used:  2371 MiB
+  Memory Free:  21681 MiB
+  GFX Clock:    2160 MHz
+  Mem Clock:    14001 MHz
+  Temperature:  47 C
+  Power State:  P0
+  Display:      active=Enabled mode=[Requested functionality has been deprecated]
+
+PyTorch CUDA device properties:
+
+CUDA Device [0] — NVIDIA GeForce RTX 5090 Laptop GPU
+  PCI Bus ID:               2
+  Compute Capability:       12.0
+  Total Memory:             23.89 GiB
+  Multi-Processor Count: 82
+  Max Threads per SM: 1536
+  Warp Size: 32
+  Shared Mem per Block (bytes): 49152
+
+================================================================================
+TensorFlow GPU Detection
+================================================================================
+GPUs detected by TensorFlow: 1
+  [0] PhysicalDevice(name='/physical_device:GPU:0', device_type='GPU')
+
+================================================================================
+TensorFlow Build Info
+================================================================================
+TensorFlow version: 2.20.0-dev0+selfbuilt
+Built with CUDA:  True
+CUDA runtime:     12.8.1
+cuDNN runtime:    9
+
+================================================================================
+Compute Capability Analysis
+================================================================================
+TF Native CC Supported (approx): 12.0
+
+Compute capabilities from nvidia-smi:
+  [0] NVIDIA GeForce RTX 5090 Laptop GPU — Compute Capability 12.0
+
+GPU[0] (nvidia-smi): NVIDIA GeForce RTX 5090 Laptop GPU — Compute Capability 12.0
+
+Recommended pairing for CC 12.0:
+  - TensorFlow 2.20.0
+  - CUDA 12.8.1
+  - cuDNN 9.8
+
+Suggested (destructive) clean reinstall sequence:
+
+    sudo apt remove --purge '*cuda' 'cuda*' '*cuda*' '*nvidia' 'nvidia*' '*nvidia*'
+    sudo apt autoremove --purge -y
+    sudo apt clean
+
+    deactivate
+    rm -rf ~/venvs/mlenv
+    rm -rf ~/.nv
+    rm -rf ~/.cache/cuda*
+    rm -rf ~/.cache/torch
+    rm -rf ~/.cache/cupy
+    rm -rf ~/.local/lib/python*/site-packages/nvidia*
+
+    python3 -m venv ~/venvs/mlenv
+    source ~/venvs/mlenv/bin/activate
+
+    pip install --upgrade pip setuptools wheel
+
+    wget https://github.com/mypapit/tensorflowRTX50/releases/download/2.20dev-ubuntu-24.04-avx-too/tensorflow-2.20.0dev0+selfbuild-cp312-cp312-linux_x86_64.whl
+    pip install --force-reinstall tensorflow-2.20.0dev0+selfbuild-cp312-cp312-linux_x86_64.whl seaborn pandas matplotlib opencv-python pillow imutils pydot graphviz librosa
+
+    wget https://developer.download.nvidia.com/compute/cuda/12.8.1/local_installers/cuda_12.8.1_570.124.06_linux.run
+    sudo sh cuda_12.8.1_570.124.06_linux.run
+
+    echo 'export PATH=/usr/local/cuda-12.8/bin:$PATH' >> ~/.bashrc
+    echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+    echo "/usr/local/cuda-12.8/lib64" | sudo tee /etc/ld.so.conf.d/cuda-12-8.conf
+    sudo ldconfig
+
+    wget https://developer.download.nvidia.com/compute/cudnn/9.8.0/local_installers/cudnn-local-repo-ubuntu2404-9.8.0_1.0-1_amd64.deb
+    sudo dpkg -i cudnn-local-repo-ubuntu2404-9.8.0_1.0-1_amd64.deb 
+    sudo cp /var/cudnn-local-repo-ubuntu2404-9.8.0/cudnn-*-keyring.gpg /usr/share/keyrings/
+
+    sudo apt update
+    sudo apt install cudnn torch
+
+    pip install nvmath-python tensorrt
+
+================================================================================
+CUDA / Library Compatibility Graph
+================================================================================
+Driver / Toolkit:
+  NVIDIA Driver:   581.80
+  CUDA Toolkit:    12.8
+
+Components:
+Component    | Version          | CUDA runtime / build     | Notes
+------------------------------------------------------------------
+Driver       | 581.80           | -                        | From nvidia-smi
+Toolkit      | 12.8             | -                        | From nvcc --version
+TensorFlow   | 2.20.0-dev0+selfbuilt | CUDA 12.8.1, cuDNN 9     | tf.sysconfig.get_build_info()
+PyTorch      | 2.9.1+cu128      | CUDA 12.8                | torch.version.cuda
+CuPy         | 13.6.0           | runtime 12.9, driver 13.0 | cp.cuda.runtime.*Version()
+NVMath       | 0.6.0            | Uses CUDA via nvmath-python | See NVMath docs
+TensorRT     | 10.14.1.48.post1 | Uses CUDA from TensorRT build | Uses CUDA libs from installed TensorRT build
+
+Use this table with NVIDIA's official compatibility matrix to validate that
+your driver, toolkit, and libraries are aligned for the RTX 5090.
+
+================================================================================
+Python NVIDIA / CUDA Modules Scan
+================================================================================
+Found 14 candidate modules:
+  - _cuda_bindings_redirector  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/_cuda_bindings_redirector.py)
+  - _numba_cuda_redirector  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/_numba_cuda_redirector.py)
+  - cupy  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/cupy/__init__.py)
+  - cupy_backends  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/cupy_backends/__init__.py)
+  - cupyx  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/cupyx/__init__.py)
+  - numba  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/numba/__init__.py)
+  - numba_cuda  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/numba_cuda/__init__.py)
+  - nvidia  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/nvidia/__init__.py)
+  - pycuda  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/pycuda/__init__.py)
+  - tensorrt  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/tensorrt/__init__.py)
+  - tensorrt_bindings  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/tensorrt_bindings/__init__.py)
+  - tensorrt_libs  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/tensorrt_libs/__init__.py)
+  - test_gpu_cuda  (location: /DEVELOPMENT/ROOT_AILH/REPOS/AILH_MASTER/AI_DEV/test_gpu_cuda.py)
+  - triton  (location: /home/emartinez/venvs/mlenv/lib/python3.12/site-packages/triton/__init__.py)
+
+================================================================================
+System CUDA / NVIDIA Shared Libraries
+================================================================================
+   /usr/lib/x86_64-linux-gnu/libcublas.so
+   /usr/lib/x86_64-linux-gnu/libcublas.so.12
+   /usr/lib/x86_64-linux-gnu/libcublas.so.12.0.2.224
+   /usr/lib/x86_64-linux-gnu/libcublasLt.so
+   /usr/lib/x86_64-linux-gnu/libcublasLt.so.12
+   /usr/lib/x86_64-linux-gnu/libcublasLt.so.12.0.2.224
+   /usr/lib/x86_64-linux-gnu/libcublasLt_static.a
+   /usr/lib/x86_64-linux-gnu/libcublas_static.a
+   /usr/lib/x86_64-linux-gnu/libcudart.so
+   /usr/lib/x86_64-linux-gnu/libcudart.so.12
+   /usr/lib/x86_64-linux-gnu/libcudart.so.12.0.146
+   /usr/lib/x86_64-linux-gnu/libcudart_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn.so
+   /usr/lib/x86_64-linux-gnu/libcudnn.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_adv.so
+   /usr/lib/x86_64-linux-gnu/libcudnn_adv.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn_adv.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_adv_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_adv_static_v9.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_cnn.so
+   /usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_cnn_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_cnn_static_v9.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled_static_v9.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled_static_v9.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_graph.so
+   /usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_graph_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_graph_static_v9.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so
+   /usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_heuristic_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_heuristic_static_v9.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_ops.so
+   /usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9
+   /usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9.8.0
+   /usr/lib/x86_64-linux-gnu/libcudnn_ops_static.a
+   /usr/lib/x86_64-linux-gnu/libcudnn_ops_static_v9.a
+   /usr/lib/x86_64-linux-gnu/libcufft.so
+   /usr/lib/x86_64-linux-gnu/libcufft.so.11
+   /usr/lib/x86_64-linux-gnu/libcufft.so.11.0.1.95
+   /usr/lib/x86_64-linux-gnu/libcufft_static.a
+   /usr/lib/x86_64-linux-gnu/libcufft_static_nocallback.a
+   /usr/lib/x86_64-linux-gnu/libcufftw.so
+   /usr/lib/x86_64-linux-gnu/libcufftw.so.11
+   /usr/lib/x86_64-linux-gnu/libcufftw.so.11.0.1.95
+   /usr/lib/x86_64-linux-gnu/libcufftw_static.a
+   /usr/lib/x86_64-linux-gnu/libcurand.so
+   /usr/lib/x86_64-linux-gnu/libcurand.so.10
+   /usr/lib/x86_64-linux-gnu/libcurand.so.10.3.1.124
+   /usr/lib/x86_64-linux-gnu/libcurand_static.a
+   /usr/lib/x86_64-linux-gnu/libcusolver.so
+   /usr/lib/x86_64-linux-gnu/libcusolver.so.11
+   /usr/lib/x86_64-linux-gnu/libcusolver.so.11.4.3.1
+   /usr/lib/x86_64-linux-gnu/libcusolverMg.so
+   /usr/lib/x86_64-linux-gnu/libcusolverMg.so.11
+   /usr/lib/x86_64-linux-gnu/libcusolverMg.so.11.4.3.1
+   /usr/lib/x86_64-linux-gnu/libcusolver_lapack_static.a
+   /usr/lib/x86_64-linux-gnu/libcusolver_metis_static.a
+   /usr/lib/x86_64-linux-gnu/libcusolver_static.a
+   /usr/lib/x86_64-linux-gnu/libcusparse.so
+   /usr/lib/x86_64-linux-gnu/libcusparse.so.12
+   /usr/lib/x86_64-linux-gnu/libcusparse.so.12.0.1.140
+   /usr/lib/x86_64-linux-gnu/libcusparse_static.a
+   /usr/lib/x86_64-linux-gnu/libnvToolsExt.so
+   /usr/lib/x86_64-linux-gnu/libnvToolsExt.so.1
+   /usr/lib/x86_64-linux-gnu/libnvToolsExt.so.1.0.0
+   /usr/lib/x86_64-linux-gnu/libnvrtc-builtins.so
+   /usr/lib/x86_64-linux-gnu/libnvrtc-builtins.so.12.0
+   /usr/lib/x86_64-linux-gnu/libnvrtc-builtins.so.12.0.140
+   /usr/lib/x86_64-linux-gnu/libnvrtc-builtins_static.a
+   /usr/lib/x86_64-linux-gnu/libnvrtc.so
+   /usr/lib/x86_64-linux-gnu/libnvrtc.so.12
+   /usr/lib/x86_64-linux-gnu/libnvrtc.so.12.0.140
+   /usr/lib/x86_64-linux-gnu/libnvrtc_static.a
+   /usr/local/cuda-12.8/lib64/libcublas.so
+   /usr/local/cuda-12.8/lib64/libcublas.so.12
+   /usr/local/cuda-12.8/lib64/libcublas.so.12.8.4.1
+   /usr/local/cuda-12.8/lib64/libcublasLt.so
+   /usr/local/cuda-12.8/lib64/libcublasLt.so.12
+   /usr/local/cuda-12.8/lib64/libcublasLt.so.12.8.4.1
+   /usr/local/cuda-12.8/lib64/libcublasLt_static.a
+   /usr/local/cuda-12.8/lib64/libcublas_static.a
+   /usr/local/cuda-12.8/lib64/libcudart.so
+   /usr/local/cuda-12.8/lib64/libcudart.so.12
+   /usr/local/cuda-12.8/lib64/libcudart.so.12.8.90
+   /usr/local/cuda-12.8/lib64/libcudart_static.a
+   /usr/local/cuda-12.8/lib64/libcufft.so
+   /usr/local/cuda-12.8/lib64/libcufft.so.11
+   /usr/local/cuda-12.8/lib64/libcufft.so.11.3.3.83
+   /usr/local/cuda-12.8/lib64/libcufft_static.a
+   /usr/local/cuda-12.8/lib64/libcufft_static_nocallback.a
+   /usr/local/cuda-12.8/lib64/libcufftw.so
+   /usr/local/cuda-12.8/lib64/libcufftw.so.11
+   /usr/local/cuda-12.8/lib64/libcufftw.so.11.3.3.83
+   /usr/local/cuda-12.8/lib64/libcufftw_static.a
+   /usr/local/cuda-12.8/lib64/libcurand.so
+   /usr/local/cuda-12.8/lib64/libcurand.so.10
+   /usr/local/cuda-12.8/lib64/libcurand.so.10.3.9.90
+   /usr/local/cuda-12.8/lib64/libcurand_static.a
+   /usr/local/cuda-12.8/lib64/libcusolver.so
+   /usr/local/cuda-12.8/lib64/libcusolver.so.11
+   /usr/local/cuda-12.8/lib64/libcusolver.so.11.7.3.90
+   /usr/local/cuda-12.8/lib64/libcusolverMg.so
+   /usr/local/cuda-12.8/lib64/libcusolverMg.so.11
+   /usr/local/cuda-12.8/lib64/libcusolverMg.so.11.7.3.90
+   /usr/local/cuda-12.8/lib64/libcusolver_lapack_static.a
+   /usr/local/cuda-12.8/lib64/libcusolver_metis_static.a
+   /usr/local/cuda-12.8/lib64/libcusolver_static.a
+   /usr/local/cuda-12.8/lib64/libcusparse.so
+   /usr/local/cuda-12.8/lib64/libcusparse.so.12
+   /usr/local/cuda-12.8/lib64/libcusparse.so.12.5.8.93
+   /usr/local/cuda-12.8/lib64/libcusparse_static.a
+   /usr/local/cuda-12.8/lib64/libnvToolsExt.so
+   /usr/local/cuda-12.8/lib64/libnvToolsExt.so.1
+   /usr/local/cuda-12.8/lib64/libnvToolsExt.so.1.0.0
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins.alt.so
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins.alt.so.12.8
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins.alt.so.12.8.93
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins.so
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins.so.12.8
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins.so.12.8.93
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins_static.a
+   /usr/local/cuda-12.8/lib64/libnvrtc-builtins_static.alt.a
+   /usr/local/cuda-12.8/lib64/libnvrtc.alt.so
+   /usr/local/cuda-12.8/lib64/libnvrtc.alt.so.12
+   /usr/local/cuda-12.8/lib64/libnvrtc.alt.so.12.8.93
+   /usr/local/cuda-12.8/lib64/libnvrtc.so
+   /usr/local/cuda-12.8/lib64/libnvrtc.so.12
+   /usr/local/cuda-12.8/lib64/libnvrtc.so.12.8.93
+   /usr/local/cuda-12.8/lib64/libnvrtc_static.a
+   /usr/local/cuda-12.8/lib64/libnvrtc_static.alt.a
+   /usr/local/cuda/lib64/libcublas.so
+   /usr/local/cuda/lib64/libcublas.so.12
+   /usr/local/cuda/lib64/libcublas.so.12.8.4.1
+   /usr/local/cuda/lib64/libcublasLt.so
+   /usr/local/cuda/lib64/libcublasLt.so.12
+   /usr/local/cuda/lib64/libcublasLt.so.12.8.4.1
+   /usr/local/cuda/lib64/libcublasLt_static.a
+   /usr/local/cuda/lib64/libcublas_static.a
+   /usr/local/cuda/lib64/libcudart.so
+   /usr/local/cuda/lib64/libcudart.so.12
+   /usr/local/cuda/lib64/libcudart.so.12.8.90
+   /usr/local/cuda/lib64/libcudart_static.a
+   /usr/local/cuda/lib64/libcufft.so
+   /usr/local/cuda/lib64/libcufft.so.11
+   /usr/local/cuda/lib64/libcufft.so.11.3.3.83
+   /usr/local/cuda/lib64/libcufft_static.a
+   /usr/local/cuda/lib64/libcufft_static_nocallback.a
+   /usr/local/cuda/lib64/libcufftw.so
+   /usr/local/cuda/lib64/libcufftw.so.11
+   /usr/local/cuda/lib64/libcufftw.so.11.3.3.83
+   /usr/local/cuda/lib64/libcufftw_static.a
+   /usr/local/cuda/lib64/libcurand.so
+   /usr/local/cuda/lib64/libcurand.so.10
+   /usr/local/cuda/lib64/libcurand.so.10.3.9.90
+   /usr/local/cuda/lib64/libcurand_static.a
+   /usr/local/cuda/lib64/libcusolver.so
+   /usr/local/cuda/lib64/libcusolver.so.11
+   /usr/local/cuda/lib64/libcusolver.so.11.7.3.90
+   /usr/local/cuda/lib64/libcusolverMg.so
+   /usr/local/cuda/lib64/libcusolverMg.so.11
+   /usr/local/cuda/lib64/libcusolverMg.so.11.7.3.90
+   /usr/local/cuda/lib64/libcusolver_lapack_static.a
+   /usr/local/cuda/lib64/libcusolver_metis_static.a
+   /usr/local/cuda/lib64/libcusolver_static.a
+   /usr/local/cuda/lib64/libcusparse.so
+   /usr/local/cuda/lib64/libcusparse.so.12
+   /usr/local/cuda/lib64/libcusparse.so.12.5.8.93
+   /usr/local/cuda/lib64/libcusparse_static.a
+   /usr/local/cuda/lib64/libnvToolsExt.so
+   /usr/local/cuda/lib64/libnvToolsExt.so.1
+   /usr/local/cuda/lib64/libnvToolsExt.so.1.0.0
+   /usr/local/cuda/lib64/libnvrtc-builtins.alt.so
+   /usr/local/cuda/lib64/libnvrtc-builtins.alt.so.12.8
+   /usr/local/cuda/lib64/libnvrtc-builtins.alt.so.12.8.93
+   /usr/local/cuda/lib64/libnvrtc-builtins.so
+   /usr/local/cuda/lib64/libnvrtc-builtins.so.12.8
+   /usr/local/cuda/lib64/libnvrtc-builtins.so.12.8.93
+   /usr/local/cuda/lib64/libnvrtc-builtins_static.a
+   /usr/local/cuda/lib64/libnvrtc-builtins_static.alt.a
+   /usr/local/cuda/lib64/libnvrtc.alt.so
+   /usr/local/cuda/lib64/libnvrtc.alt.so.12
+   /usr/local/cuda/lib64/libnvrtc.alt.so.12.8.93
+   /usr/local/cuda/lib64/libnvrtc.so
+   /usr/local/cuda/lib64/libnvrtc.so.12
+   /usr/local/cuda/lib64/libnvrtc.so.12.8.93
+   /usr/local/cuda/lib64/libnvrtc_static.a
+   /usr/local/cuda/lib64/libnvrtc_static.alt.a
+
+================================================================================
+TensorFlow Diagnostics + Stress Suite
+================================================================================
+CPUs visible to TF: 1
+GPUs visible to TF: 1
+
+[TF] CPU smoke tests (Conv2D, matmul, gradients)
+✅ CPU Conv2D OK. Time: 3.70 ms
+✅ CPU matmul OK. Time: 5.38 ms
+✅ CPU gradient test OK. Time: 40.44 ms
+
+[TF] GPU smoke tests (Conv2D, matmul, gradients)
+Conv2D output device: /job:localhost/replica:0/task:0/device:GPU:0
+✅ GPU Conv2D OK. Time: 10.90 ms
+✅ GPU matmul OK. Time: 3.46 ms
+✅ GPU gradient test OK. Time: 5.27 ms
+
+[TF] CPU vs GPU comparison (same shapes):
+  Conv2D: CPU 3.70 ms vs GPU 10.90 ms → 0.3x faster
+  Matmul: CPU 5.38 ms vs GPU 3.46 ms → 1.6x faster
+  Gradient: CPU 40.44 ms vs GPU 5.27 ms → 7.7x faster
+
+[TF] GPU stress test (adapted, medium) — Conv2D: batch=16, H=W=384, C_in=4, C_out=64; Matmul: 12288 x 12288; Iters=10
+[TF] Conv2D work elements: 150994944 (7.55% of 2,000,000,000 limit)
+  Conv2D stress: 10 iters, total 731.35 ms, avg 73.13 ms/iter
+  Matmul stress: 10 iters, total 1394.31 ms, avg 139.43 ms/iter
+✅ TensorFlow GPU stress test (medium) completed without errors.
+
+================================================================================
+PyTorch Diagnostics + Stress Suite
+================================================================================
+PyTorch version: 2.9.1+cu128
+PyTorch CUDA version: 12.8
+CUDA available: True
+
+[PyTorch] CPU smoke tests (Conv2d, matmul, gradients)
+✅ CPU Conv2d OK. Time: 53.85 ms
+✅ CPU matmul OK. Time: 38.37 ms
+✅ CPU gradient test OK. Time: 131.52 ms
+
+[PyTorch] Using device: cuda:0
+GPU name: NVIDIA GeForce RTX 5090 Laptop GPU
+GPU capability: (12, 0)
+
+[PyTorch] GPU smoke tests (Conv2d, matmul, gradients)
+✅ GPU Conv2d OK. Time: 29.76 ms
+Conv2d output shape: (16, 32, 64, 64)
+✅ GPU matmul OK. Time: 2.71 ms
+✅ GPU gradient test OK. Time: 73.22 ms
+
+[PyTorch] CPU vs GPU comparison (same shapes):
+  Conv2d: CPU 53.85 ms vs GPU 29.76 ms → 1.8x faster
+  Matmul: CPU 38.37 ms vs GPU 2.71 ms → 14.2x faster
+  Gradient: CPU 131.52 ms vs GPU 73.22 ms → 1.8x faster
+
+[PyTorch] GPU stress test (adapted, medium) — Conv2d: N=16, C_in=4, H=W=384, C_out=64; Matmul: 12288 x 12288; Iters=10
+  Conv2d stress: 10 iters, total 118.03 ms, avg 11.80 ms/iter
+  Matmul stress: 10 iters, total 1518.59 ms, avg 151.86 ms/iter (dtype=torch.float32, size=12288x12288)
+✅ PyTorch GPU stress test (medium) completed without errors.
+
+================================================================================
+CuPy Diagnostics + GEMM Benchmark
+================================================================================
+✅ CuPy sees CUDA device 0: <CUDA Device 0>
+
+[CuPy] fp32 GEMM: 12288 x 12288 @ 12288 x 12288, dtype=<class 'numpy.float32'>
+  Total time: 1484.31 ms (148.43 ms/iter), Rate: 25.00 TFLOP/s
+
+[CuPy] fp16 GEMM: 12288 x 12288 @ 12288 x 12288, dtype=<class 'numpy.float16'>
+  Total time: 411.20 ms (41.12 ms/iter), Rate: 90.25 TFLOP/s
+
+================================================================================
+TensorRT Smoke Test + Micro-Benchmark
+================================================================================
+TensorRT version: 10.14.1.48.post1
+Using EXPLICIT_BATCH network flag.
+IBuilderConfig type: <class 'tensorrt_bindings.tensorrt.IBuilderConfig'>
+Using set_memory_pool_limit(MemoryPoolType.WORKSPACE, size) API.
+Building a trivial TensorRT identity engine...
+Using builder.build_serialized_network(...) + trt.Runtime().
+✅ Engine build OK. Time: 702.28 ms
+Running a single inference with PyCUDA for smoke test...
+✅ Inference OK. Time: 0.26 ms
+
+================================================================================
+GEMM / NVMath Benchmarks (NumPy, PyTorch, NVMath; fp32 + fp16)
+================================================================================
+Matrix size: 12288 x 12288
+Timed iters: 10, Warmup: 3
+NumPy baseline in GEMM: enabled
+
+================================================================================
+Running fp32 GEMM benchmarks
+================================================================================
+
+[NumPy] GEMM benchmark (CPU) — size=12288x12288, dtype=fp32, iters=10, warmup=3
+  Total time: 23760.66 ms
+  Per-iter time: 2376.07 ms
+  Average rate: 1.56 TFLOP/s
+
+[PyTorch] GEMM benchmark on cuda:0 — size=12288x12288, dtype=fp32, iters=10, warmup=3
+  Total time: 1498.46 ms
+  Per-iter time: 149.85 ms
+  Average rate: 24.76 TFLOP/s
+
+[NVMath] GEMM benchmark via nvmath.linalg.advanced.matmul — size=12288x12288, dtype=fp32, iters=10, warmup=3
+  Total time: 3300.79 ms
+  Per-iter time: 330.08 ms
+  Average rate: 11.24 TFLOP/s
+
+--------------------------------------------------------------------------------
+fp32 GEMM Summary (TFLOP/s)
+--------------------------------------------------------------------------------
+NumPy (CPU):    1.56 TFLOP/s
+PyTorch (GPU):  24.76 TFLOP/s
+NVMath (GPU):   11.24 TFLOP/s
+
+================================================================================
+Running fp16 GEMM benchmarks
+================================================================================
+
+[NumPy] GEMM benchmark (CPU) — size=12288x12288, dtype=fp32 (CPU baseline for fp16), iters=10, warmup=3
+  Total time: 25656.15 ms
+  Per-iter time: 2565.61 ms
+  Average rate: 1.45 TFLOP/s
+
+[PyTorch] GEMM benchmark on cuda:0 — size=12288x12288, dtype=fp16, iters=10, warmup=3
+  Total time: 413.11 ms
+  Per-iter time: 41.31 ms
+  Average rate: 89.83 TFLOP/s
+
+[NVMath] GEMM benchmark via nvmath.linalg.advanced.matmul — size=12288x12288, dtype=fp16, iters=10, warmup=3
+  Total time: 498.65 ms
+  Per-iter time: 49.87 ms
+  Average rate: 74.42 TFLOP/s
+
+--------------------------------------------------------------------------------
+fp16 GEMM Summary (TFLOP/s)
+--------------------------------------------------------------------------------
+NumPy (CPU):    1.45 TFLOP/s
+PyTorch (GPU):  89.83 TFLOP/s
+NVMath (GPU):   74.42 TFLOP/s
+
+================================================================================
+Combined GEMM Summary (TFLOP/s)
+================================================================================
+Backend              fp32         fp16    fp16/fp32
+--------------------------------------------------------------------------------
+NumPy (CPU)  1.56 TFLOP/s 1.45 TFLOP/s        0.93x
+PyTorch      24.76 TFLOP/s 89.83 TFLOP/s        3.63x
+NVMath       11.24 TFLOP/s 74.42 TFLOP/s        6.62x
+
+GEMM benchmarks done.
+
+================================================================================
+PTXAS Diagnostics
+================================================================================
+✅ ptxas found at: /usr/local/cuda-12.8/bin/ptxas
+ptxas --version output:
+  ptxas: NVIDIA (R) Ptx optimizing assembler
+  Copyright (c) 2005-2025 NVIDIA Corporation
+  Built on Fri_Feb_21_20:21:21_PST_2025
+  Cuda compilation tools, release 12.8, V12.8.93
+  Build cuda_12.8.r12.8/compiler.35583870_0
+✅ ptxas version query OK. Time: 1.89 ms
+
+================================================================================
+Resource / Parallelism Suggestion
+================================================================================
+OPTUNA_JOBS=1, MAIN_JOBS=24, CPU_COUNT=24, GPU=True
+=====================================
+
+================================================================================
+RTX 5090 Optimization Plan
+================================================================================
+Detected GPU[0]: NVIDIA GeForce RTX 5090 Laptop GPU (compute capability=12.0)
+1. Driver / CUDA / cuDNN baseline
+   - Keep NVIDIA driver at or above the version recommended for recent CUDA 12.x.
+   - Prefer CUDA 12.8.x toolkit for Blackwell-class GPUs when stable in your distro.
+   - Use cuDNN 9.x for best convolution performance on modern architectures.
+
+2. TensorFlow stack (if in use)
+   - Target recent TensorFlow 2.x builds compiled against CUDA 12.5+ / 12.8.x.
+   - Enable memory growth (already enabled in this script) to avoid full VRAM grab.
+   - For training/inference:
+       * Enable mixed precision (float16 / bfloat16) if your model is stable.
+       * Enable XLA where beneficial (tf.function(jit_compile=True) on hot paths).
+       * Monitor first-run latency due to PTX JIT; consider ahead-of-time builds if needed.
+
+3. PyTorch stack (if in use)
+   - Install a PyTorch build compiled against a recent CUDA 12.x runtime.
+   - In your training code:
+       * torch.backends.cuda.matmul.allow_tf32 = True
+       * torch.backends.cudnn.allow_tf32 = True
+       * torch.set_float32_matmul_precision('high')
+       * Use pin_memory=True and non_blocking=True in DataLoader / .to(device).
+       * Use multiple worker processes for I/O (num_workers tuned to CPU cores / storage).
+       * Consider multiple CUDA streams for overlap of H2D copies and compute.
+
+4. CuPy / NVMath numerical kernels
+   - Use CuPy for custom kernels and array ops that complement PyTorch/TF.
+   - Align CuPy's CUDA variant (cupy-cudaXXX) with your installed toolkit (e.g., cuda12x).
+   - Use float16 / bfloat16 in heavy GEMMs when acceptable; benchmark vs NVMath / Torch.
+   - NVMath (nvmath-python) can provide high-performance GEMM; compare its TFLOPs
+     vs PyTorch/CuPy for your target GEMM sizes (e.g., 12288x12288).
+
+5. TensorRT optimization (if in use)
+   - Use TensorRT for latency-critical inference paths.
+   - Prefer FP16 or BF16 engines by default; experiment with FP8 when Blackwell support
+     is production-ready in your stack.
+   - Calibrate INT8 only when you have solid calibration datasets.
+
+6. General GPU utilization and pipeline tuning
+   - Ensure input pipelines (NVMe → CPU → GPU) are saturated: monitor GPU utilization
+     while your mel pipeline runs (nvidia-smi, nsight, or your status reporter).
+   - Keep batch sizes large enough to reach high SM occupancy, but below OOM thresholds.
+   - For large GEMMs / FFTs / mel pipelines, avoid thrashing VRAM: reuse buffers and
+     favor pre-allocated workspaces (as this suite and your pipeline already do).
+   - Profile frequently with Nsight Systems / Nsight Compute to check for:
+       * Kernel launch overhead
+       * Under-utilized SMs
+       * PCIe bottlenecks (H2D/D2H transfers overlapping poorly with compute)
+
+================================================================================
+Summary (Diagnostics + Medium Stress Tests)
+================================================================================
+TensorFlow:
+  Installed:      True
+  GPU available:  True
+  GPU Conv2D OK:  True
+  GPU matmul OK:  True
+  GPU grad OK:    True
+  GPU stress OK:  True
+
+PyTorch:
+  Installed:      True
+  GPU available:  True
+  GPU Conv2d OK:  True
+  GPU matmul OK:  True
+  GPU grad OK:    True
+  GPU stress OK:  True
+
+CuPy:
+  Installed:      True
+  CUDA available: True
+  fp32 TFLOP/s:   25.000534582841375
+  fp16 TFLOP/s:   90.24532833719647
+
+TensorRT:
+  Installed:      True
+  Engine built:   True
+  Build time ms:  702.275276184082
+  Infer time ms:  0.26035308837890625
+
+PTXAS:
+  (see PTXAS Diagnostics section above for details)
+
+GEMM Benchmarks:
+  (see GEMM / NVMath Benchmarks section above for TFLOP/s results)
+
+Done.
