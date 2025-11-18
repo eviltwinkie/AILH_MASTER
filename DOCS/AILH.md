@@ -24,7 +24,7 @@ Guidelines: Create a console report as well as plots and graphs for all debuggin
 Guidelines: Follow the folder structure and layout provided below
 Guidelines: During initial/manual training, randomly shuffle and swap the reference data and validation data evenly between their respective folder locations.
 
-SAMPLE_RATE = 4096      # 4096 Hz
+SAMPLE_RATE = 4096      # 4096 Hz REQUIRED TO UPSCALE TO 8192
 SAMPLE_DURATION = 10.0         # 10 seconds
 INCREMENTAL_CONFIDENCE_THRESHOLD = 0.8  # Threshold for confidence in incremental learning
 INCREMENTAL_ROUNDS = 2
@@ -113,58 +113,76 @@ UPDATE_DATA/NEGATIVE - False negative labeled data to be used as reference
 
 
 
+Development environment is a windows 11 workstation with WSL2 Ubuntu 
+
+All code in AI_DEV is the collection of various development efforts to use as reference or reuse
+
 vvvvvvvvvvvvvvvvvvvvvvv FOLDER STRUCTURE / LAYOUT vvvvvvvvvvvvvvvvvvvvvvv 
 
-AMSYS
+ROOT_AILH
 |
-├── SENSOR_DATA
-│   ├── RAW_SIGNALS
-│   └── LABELED_SEGMENTS
+├── ATTIC (STORAGE FILES/DOCS)
 |
-├── REFERENCE_DATA
-|   ├── TRAINING
-|   |   ├── QUIET
+├── DATA_SENSORS (INCOMING SENSOR DATA, MULTIPLE FOLDERS)
+|   |
+│   ├── DATA_FOLDER
+|   .
+|   .
+|   .
+│   └── DATA_FOLDER
+|
+├── DATA_STORE (DATASETS, LOGS, OUTPUT, ETC)
+|   |
+|   ├── DATASET_DEV (TEMP DEVELOPMENT USE FOR CODE TESTING)
+|   |   ├── BACKGROUND
+|   |   ├── CRACK
 |   |   ├── LEAK
 |   |   ├── NORMAL
-|   │   ├── RANDOM
-|   │   ├── MECHANICAL
 |   │   └── UNCLASSIFIED
-|   └── VALIDATION
-|       ├── QUIET
-|       ├── LEAK
-|       ├── NORMAL
-|       ├── RANDOM
-|       ├── MECHANICAL
-|       └── UNCLASSIFIED
-|
-├── UPDATE_DATA
-│   ├── POSITIVE
-|   |   ├── QUIET
+|   |
+|   ├── DATASET_LEARNING 
+|   |   ├── BACKGROUND
+|   |   ├── CRACK
 |   |   ├── LEAK
 |   |   ├── NORMAL
-│   |   ├── RANDOM
-│   |   ├── MECHANICAL
-│   |   └── UNCLASSIFIED
-│   └── NEGATIVE
-|       ├── QUIET
-|       ├── LEAK
-|       ├── NORMAL
-|       ├── RANDOM
-│       ├── MECHANICAL
-│       └── UNCLASSIFIED
+|   │   └── UNCLASSIFIED
+|   |
+|   ├── DATASET_TESTING
+|   |   ├── BACKGROUND
+|   |   ├── CRACK
+|   |   ├── LEAK
+|   |   ├── NORMAL
+|   │   └── UNCLASSIFIED
+|   |
+|   ├── DATASET_TRAINING
+|   |   ├── BACKGROUND
+|   |   ├── CRACK
+|   |   ├── LEAK
+|   |   ├── NORMAL
+|   │   └── UNCLASSIFIED
+|   |
+|   ├── DATASET_VALIDATION
+|   |   ├── BACKGROUND
+|   |   ├── CRACK
+|   |   ├── LEAK
+|   |   ├── NORMAL
+|   │   └── UNCLASSIFIED
+|   |
+|   ├── MASTER_DATASET (SOURCE OF ALL DATA)
+|   |   ├── BACKGROUND
+|   |   ├── CRACK
+|   |   ├── LEAK
+|   |   ├── NORMAL
+|   │   └── UNCLASSIFIED
+|   |
+|   ├── PROC_CACHE (MEMMAPS, TEMP FILES, ETC)
+|   ├── PROC_LOGS (LOGS)
+|   ├── PROC_MODELS (MODELS)
+|   ├── PROC_OUTPUT (OUTPUT)
+|   └── PROC_REPORTS (REPORTS)
 |
-└── AILH
-    ├── main.py
-    ├── config.py
-    ├── requirements.txt
-    ├── README.md
-    ├── cnn_model.py
-    ├── trainer.py
-    ├── classifier.py
-    ├── feature_extraction.py
-    ├── plotting.py
-    ├── segmentation.py
-    └── utils.py
+└── REPOS (SOURCE CODE REPOSITORIES)
+   └── AILH_MASTER (CURRENT WORKING CODE)
 
 ^^^^^^^^^^^^^^^^^^^^^^^ FOLDER STRUCTURE / LAYOUT ^^^^^^^^^^^^^^^^^^^^^^^ 
 

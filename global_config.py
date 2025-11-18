@@ -1,5 +1,3 @@
-# config.py
-
 import os
 
 CACHE_DIR = "/mnt/d/AILH_CACHE"

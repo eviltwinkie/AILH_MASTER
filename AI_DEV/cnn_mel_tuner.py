@@ -1,6 +1,6 @@
 import os
 
-from UTILITIES.old_config import SAMPLE_RATE, CACHE_DIR
+from old_config import SAMPLE_RATE, CACHE_DIR
 
 from cnn_mel_processor import compute_max_poolings, load_wavs_parallel
 from cnn_mel_trainer import get_wavs_and_labels, build_auto_cnn_mel, hash_files, robust_fit, find_safe_batch_size, after_trial_cleanup

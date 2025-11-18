@@ -32,7 +32,7 @@ CLI:
 import os
 
 # Config for output file
-OUTPUT_FILE = os.environ.get("GPU_DIAG_OUTPUT", "gpu_diagnostic_results.txt")
+OUTPUT_FILE = os.environ.get("GPU_DIAG_OUTPUT", "DOCS/test_gpu_cuda_results.txt")
 
 # Smoke testing configuration
 ENABLE_SMOKE_TESTS = os.environ.get("GPU_SMOKE_TESTS", "1").lower() in ("1", "true", "yes", "on")
@@ -1886,11 +1886,11 @@ def run_tensorflow_suite(gpus, gpu_info: Optional[Dict[str, Any]]) -> Dict[str, 
     return results
 
 
-def run_pytorch_fp8_smoke_test(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def run_pytorch_fp8_smoke_test(gpu_inventory: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     PyTorch FP8 smoke test (float8_e4m3fn and float8_e5m2).
     Only runs on GPUs with compute capability >= 12.0 (Blackwell).
-    Returns dict with test results.
+    Returns dict with test results, including fp8_torch_ok for summary.
     """
     results = {
         "installed": torch is not None,
@@ -1899,6 +1899,7 @@ def run_pytorch_fp8_smoke_test(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, 
         "e5m2_ok": False,
         "gpu_e4m3fn_ok": False,
         "gpu_e5m2_ok": False,
+        "fp8_torch_ok": False,  # Key used in summary
     }
 
     if torch is None:
@@ -1927,10 +1928,15 @@ def run_pytorch_fp8_smoke_test(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, 
         return results
 
     # Check GPU support
-    is_blackwell, gpu_name = get_blackwell_fp8_status([gpu_info] if gpu_info else [])
+    is_blackwell, gpu_name = get_blackwell_fp8_status(gpu_inventory if gpu_inventory else [])
     if not is_blackwell:
-        cc = gpu_info.get("compute_capability", {}) if gpu_info else {}
-        cc_major = cc.get("major", 0)
+        # Get CC info from gpu_inventory if available
+        cc_major = 0
+        if gpu_inventory:
+            gpu = gpu_inventory[0]
+            cc_val = gpu.get("compute_cap")
+            if cc_val is not None:
+                cc_major = int(cc_val)
         print_status(False, f"GPU CC {cc_major}.x detected; FP8 requires CC 12.0+ (Blackwell)")
         return results
 
@@ -1975,6 +1981,7 @@ def run_pytorch_fp8_smoke_test(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, 
         print_status(False, f"float8_e5m2 GPU operations failed: {repr(e)}")
 
     results["fp8_available"] = results["gpu_e4m3fn_ok"] or results["gpu_e5m2_ok"]
+    results["fp8_torch_ok"] = results["fp8_available"]  # Set the summary key
     return results
 
 
@@ -2244,13 +2251,20 @@ def run_pytorch_suite(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =============================================================================
-def bench_torch_gemm_fp8(n: int, iters: int, warmup: int) -> Dict[str, float]:
+def bench_torch_gemm_fp8(n: int, iters: int, warmup: int) -> Dict[str, Any]:
     """
     Benchmark PyTorch GEMM with FP8 dtypes (float8_e4m3fn, float8_e5m2).
     Only runs on GPUs with CC >= 12.0 (Blackwell).
     Returns dict with TFLOP/s for each dtype, or NaN if not supported.
+    Includes fp8_gemm_ok key for summary.
     """
-    results = {"fp8_e4m3fn_tflops": float("nan"), "fp8_e5m2_tflops": float("nan")}
+    results = {
+        "fp8_e4m3fn_tflops": float("nan"),
+        "fp8_e5m2_tflops": float("nan"),
+        "e4m3fn_tflops": float("nan"),  # Alias for summary
+        "e5m2_tflops": float("nan"),    # Alias for summary
+        "fp8_gemm_ok": False,             # Key used in summary
+    }
 
     if torch is None or not torch.cuda.is_available():
         return results
@@ -2292,6 +2306,8 @@ def bench_torch_gemm_fp8(n: int, iters: int, warmup: int) -> Dict[str, float]:
                 total_flops = flops_per_iter * iters
                 flops_per_sec = total_flops / elapsed
                 results["fp8_e4m3fn_tflops"] = flops_per_sec
+                results["e4m3fn_tflops"] = flops_per_sec  # Alias
+                results["fp8_gemm_ok"] = True  # Mark as successful
                 print(f"  Total time: {elapsed * 1000.0:0.2f} ms")
                 print(f"  Per-iter time: {elapsed * 1000.0 / iters:0.2f} ms")
                 print(f"  Average rate: {human_tflops(flops_per_sec)}")
@@ -2326,6 +2342,8 @@ def bench_torch_gemm_fp8(n: int, iters: int, warmup: int) -> Dict[str, float]:
                 total_flops = flops_per_iter * iters
                 flops_per_sec = total_flops / elapsed
                 results["fp8_e5m2_tflops"] = flops_per_sec
+                results["e5m2_tflops"] = flops_per_sec  # Alias
+                results["fp8_gemm_ok"] = True  # Mark as successful
                 print(f"  Total time: {elapsed * 1000.0:0.2f} ms")
                 print(f"  Per-iter time: {elapsed * 1000.0 / iters:0.2f} ms")
                 print(f"  Average rate: {human_tflops(flops_per_sec)}")
@@ -2739,7 +2757,7 @@ def main() -> None:
             
             # FP8 tests (Blackwell GPU only)
             if run_fp8_tests:
-                pytorch_fp8_results = run_pytorch_fp8_smoke_test(gpu0_info)
+                pytorch_fp8_results = run_pytorch_fp8_smoke_test(gpu_inventory)
                 fp8_gemm_results = bench_torch_gemm_fp8(n=gemm_size, iters=gemm_iters, warmup=gemm_warmup)
                 tensorrt_fp8_results = build_tensorrt_fp8_engine(gpu_inventory)
             else:

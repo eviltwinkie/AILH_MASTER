@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import quantiles
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 # Configure logging
 logging.basicConfig(
@@ -38,6 +38,58 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ---------- Status Symbols & Output Control ----------
+SUCCESS_SYMBOL = "✅"
+FAILURE_SYMBOL = "❌"
+WARNING_SYMBOL = "⚠️"
+INFO_SYMBOL = "ℹ️"
+
+# Output redirection for dual console+file output
+class TeeOutput:
+    """Redirect stdout to both console and file."""
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.file: Optional[Any] = None
+        self.original_stdout: Optional[Any] = None
+    
+    def __enter__(self):
+        self.original_stdout = sys.stdout
+        self.file = open(self.filepath, "w")
+        return self
+    
+    def __exit__(self, *args):
+        if self.file:
+            self.file.close()
+        if self.original_stdout:
+            sys.stdout = self.original_stdout
+    
+    def write(self, msg: str) -> None:
+        if self.original_stdout:
+            self.original_stdout.write(msg)
+        if self.file:
+            self.file.write(msg)
+            self.file.flush()
+    
+    def flush(self) -> None:
+        if self.original_stdout:
+            self.original_stdout.flush()
+        if self.file:
+            self.file.flush()
+
+# Helper functions for status messages
+def print_status(success: bool, message: str) -> None:
+    """Print a status message with symbol."""
+    sym = SUCCESS_SYMBOL if success else FAILURE_SYMBOL
+    print(f"{sym} {message}")
+
+def print_warning(message: str) -> None:
+    """Print a warning message."""
+    print(f"{WARNING_SYMBOL} {message}")
+
+def print_info(message: str) -> None:
+    """Print an info message."""
+    print(f"{INFO_SYMBOL} {message}")
 
 # ---------- small helpers ----------
 def _split_env_list(name: str, default: list[str]) -> list[str]:
@@ -92,7 +144,7 @@ class Config:
     """
 
     # ---- Dataset selection defaults ----
-    ROOT        = os.environ.get("SFA_ROOT", "/DEVELOPMENT/ROOT_AILH/DATA_STORE/TRAINING")  
+    ROOT        = os.environ.get("SFA_ROOT", "/DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_DEV")  
     PATTERN     = os.environ.get("SFA_PATTERN", "*.wav")
     MIN_BYTES   = _env_int("SFA_MIN_BYTES", 60000)
     MAX_BYTES   = _env_int("SFA_MAX_BYTES", 120000)
@@ -116,18 +168,21 @@ class Config:
 
 
     # ---- Rounds ----
-    ROUNDS      = _env_int("SFA_ROUNDS", 5)       # warm-cache repeats per combo
-    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", 5)  # optional cold-ish rounds (per-file DONTNEED)
+    ROUNDS      = _env_int("SFA_ROUNDS", 3)       # warm-cache repeats per combo
+    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", 2)  # optional cold-ish rounds (per-file DONTNEED)
     TRUE_COLD   = _env_bool("SFA_TRUE_COLD", False)
 
     # ---- Latency recording ----
     RECORD_LATENCIES = _env_bool("SFA_RECORD_LATENCIES", False)
 
     # ---- Output artifacts ----
-    CSV_FILE     = os.environ.get("SFA_CSV", "smallfile_autotune_results.csv")
-    BEST_JSON    = os.environ.get("SFA_BEST_JSON", "best_smallfiles.json")
-    BEST_TEXT    = os.environ.get("SFA_BEST_TEXT", "best_smallfiles_results.txt")
-    BEST_SNIPPET = os.environ.get("SFA_BEST_SNIPPET", "best_smallfiles_snippet.py")
+    BEST_JSON    = os.environ.get("SFA_BEST_JSON", "../DOCS/test_disk_tune_results.json")
+    BEST_TEXT    = os.environ.get("SFA_BEST_TEXT", "../DOCS/test_disk_tune_results.txt")
+    
+    # ---- Output control ----
+    WRITE_JSON = _env_bool("SFA_WRITE_JSON", True)
+    WRITE_TEXT = _env_bool("SFA_WRITE_TEXT", True)
+    VERBOSE = _env_bool("SFA_VERBOSE", False)
 
 # ---------- Constants ----------
 # fadvise constants (Linux)
@@ -703,42 +758,6 @@ def summarize(total_bytes: int, elapsed: float, nfiles: int, latencies: Optional
     }
 
 # ---------- Auto-tuning ----------
-def _trial_csv_header():
-    return [
-        "threads","bufsize","method","fadvise","noatime","mode","round",
-        "nfiles","bytes","elapsed_s","mbps","files_per_s","avg_ms","p95_ms",
-        "max_inflight","files_per_task"
-    ]
-
-def _emit_csv_row(writer: csv.DictWriter, stats: Dict[str, Any], meta: Dict[str, Any]):
-    """
-    Write a CSV row with benchmark results.
-    
-    Args:
-        writer: CSV DictWriter instance
-        stats: Computed statistics dictionary
-        meta: Metadata about the trial
-    """
-    row = {
-        "threads": meta["threads"],
-        "bufsize": meta["bufsize"],
-        "method": meta["method"],
-        "fadvise": meta["fadvise"] or "NONE",
-        "noatime": int(meta["noatime"]),
-        "mode": meta["mode"],
-        "round": meta["round"],
-        "nfiles": meta["nfiles"],
-        "bytes": meta["bytes"],
-        "elapsed_s": round(meta["elapsed"], 6),
-        "mbps": round(stats["mbps"], 3),
-        "files_per_s": round(stats["files_per_s"], 3),
-        "avg_ms": round(stats["avg_ms"], 3),
-        "p95_ms": round(stats["p95_ms"], 3) if stats["p95_ms"] is not None else "",
-        "max_inflight": meta["max_inflight"] or 0,
-        "files_per_task": meta["files_per_task"],
-    }
-    writer.writerow(row)
-
 def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[str] = None,
                          min_bytes: Optional[int] = None, max_bytes: Optional[int] = None,
                          limit: Optional[int] = None, shuffle: Optional[bool] = None) -> Dict[str, Any]:
@@ -775,7 +794,9 @@ def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[st
 
     # Storage context
     ctx = detect_device_info(root)
-    print("=== STORAGE CONTEXT ===")
+    print("\n" + "=" * 80)
+    print("STORAGE CONTEXT")
+    print("=" * 80)
     print(f"Path:          {root.resolve()}")
     print(f"Mount point:   {ctx.get('mount_point')}")
     print(f"Filesystem:    {ctx.get('fstype')}")
@@ -786,16 +807,12 @@ def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[st
         extra = f" (S/N {ctx.get('serial')})" if ctx.get('serial') else ""
         print(f"Drive model:   {model_line}{extra}")
     else:
-        print("Drive model:   (unknown)")
+        print_warning("Drive model:   (unknown)")
 
     # O_NOATIME probe
     test_file = files[0]
     ono_ok, ono_reason = can_use_onoatime(test_file)
-    print(f"O_NOATIME test on sample file: usable={ono_ok} ({ono_reason})")
-
-    # CSV
-    fcsv = open(cfg.CSV_FILE, "w", newline="")
-    writer = csv.DictWriter(fcsv, fieldnames=_trial_csv_header()); writer.writeheader()    
+    print_status(ono_ok, f"O_NOATIME usable ({ono_reason})")
 
     from statistics import mean, stdev
 
@@ -851,9 +868,6 @@ def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[st
                         "nfiles": len(files), "bytes": total, "elapsed": elapsed,
                         "max_inflight": infl, "files_per_task": fpt
                     }
-
-                    _emit_csv_row(writer, stats, meta)
-                    fcsv.flush()
 
                     label = (f"thr={thr} buf={buf} method={meth} fadvise={fav} "
                             f"inflight={infl} fpt={fpt} noatime={int(ono_ok)}")
@@ -967,39 +981,11 @@ def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[st
 
     best_stats_final, best_final, fine_ranked = run_trials(fine_space)
 
-    fcsv.close()
-
-    # ---- Emit aggregated CSV (averages) from fine search ----
-    agg_path = "smallfile_autotune_results_aggregated.csv"
-    with open(agg_path, "w", newline="") as fagg:
-        w = csv.DictWriter(fagg, fieldnames=[
-            "threads","bufsize","method","fadvise","noatime",
-            "max_inflight","files_per_task",
-            "runs","files_per_s_mean","files_per_s_sd",
-            "avg_ms_mean","avg_ms_sd","mbps_mean","mbps_sd"
-        ])
-        w.writeheader()
-        for e in fine_ranked:
-            m = e["meta"]; s = e["means"]
-            w.writerow({
-                "threads": m["threads"],
-                "bufsize": m["bufsize"],
-                "method": m["method"],
-                "fadvise": m["fadvise"],
-                "noatime": int(m["noatime"]),
-                "max_inflight": m["max_inflight"],
-                "files_per_task": m["files_per_task"],
-                "runs": s["count"],
-                "files_per_s_mean": round(s["files_per_s"], 3),
-                "files_per_s_sd": (round(s["files_per_s_sd"], 3) if s["files_per_s_sd"] is not None else ""),
-                "avg_ms_mean": round(s["avg_ms"], 3),
-                "avg_ms_sd": (round(s["avg_ms_sd"], 3) if s["avg_ms_sd"] is not None else ""),
-                "mbps_mean": round(s["mbps"], 3),
-                "mbps_sd": (round(s["mbps_sd"], 3) if s["mbps_sd"] is not None else ""),
-            })
-
-    # ---- Print BEST and RUNNER-UP with averaged metrics ----
-    print("\n=== AVERAGED WINNERS (warm) ===")
+    # ---- Print AVERAGED WINNERS (warm) ----
+    print("\n" + "=" * 80)
+    print("AVERAGED WINNERS (warm-cache, ranked by files/sec)")
+    print("=" * 80)
+    
     def _fmt(entry):
         m, s = entry["meta"], entry["means"]
         sd_f = (f" ±{s['files_per_s_sd']:.3f}" if s["files_per_s_sd"] is not None else "")
@@ -1011,12 +997,11 @@ def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[st
                 f"avg_ms (mean){sd_a}: {s['avg_ms']:.3f} | "
                 f"MB/s (mean){sd_m}: {s['mbps']:.3f} | runs={s['count']}")
 
-    print("BEST:\n" + _fmt(fine_ranked[0]))
+    print("\nBEST:\n" + _fmt(fine_ranked[0]))
     if len(fine_ranked) > 1:
         print("\nRUNNER-UP:\n" + _fmt(fine_ranked[1]))
     else:
-        print("\nRUNNER-UP: (not available; only one combo evaluated)")
-    print(f"\nAggregated CSV (means): {agg_path}")
+        print_warning("RUNNER-UP: (only one combo evaluated)")
 
     chosen = {
         # Tuned knobs
@@ -1046,17 +1031,24 @@ def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[st
         }
     }
 
-    with open(Config.BEST_JSON, "w") as f:
-        json.dump(chosen, f, indent=2)
-    _write_best_snippet(chosen)
-    _write_best_text(chosen, ctx, fine_ranked)
+    # Write JSON output
+    if Config.WRITE_JSON:
+        try:
+            with open(Config.BEST_JSON, "w") as f:
+                json.dump(chosen, f, indent=2)
+            print_status(True, f"Best config saved to: {Config.BEST_JSON}")
+        except Exception as e:
+            print_status(False, f"Failed to write JSON: {e}")
 
-    print("\n=== BEST (warm, by files/sec) ===")
+    # Write text output
+    if Config.WRITE_TEXT:
+        _write_best_text(chosen, ctx, fine_ranked)
+
+    print("\n" + "=" * 80)
+    print("BEST CONFIGURATION (warm-cache, by files/sec)")
+    print("=" * 80)
     print(json.dumps(chosen, indent=2))
-    print(f"\nResults CSV: {Config.CSV_FILE}")
-    print(f"Best JSON  : {Config.BEST_JSON}")
-    print(f"Best Text  : {Config.BEST_TEXT}")
-    print(f"Snippet    : {Config.BEST_SNIPPET}")
+    print("=" * 80)
     return chosen
 
 # ---------- Results output functions ----------
@@ -1140,148 +1132,52 @@ def _write_best_text(best: Dict[str, Any], storage_context: Dict[str, Any],
     except Exception as e:
         logger.error(f"Failed to write text results: {e}")
 
-# ---------- Production snippet emitter ----------
-def _write_best_snippet(best: dict):
-    code = f'''# Auto-generated by smallfile_autotune.py
-# Paste this into your project to replicate the fastest read path and dataset selection used.
-
-import os
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# Tuned knobs
-BEST_THREADS        = {best["threads"]}
-BEST_BUFSIZE        = {best["bufsize"]}
-BEST_METHOD         = "{best["method"]}"
-BEST_FADVISE        = "{best["fadvise"]}"
-BEST_USE_NOATIME    = {str(best["use_noatime"])}
-BEST_MAX_INFLIGHT   = {best["max_inflight"] or 0}
-BEST_FILES_PER_TASK = {best["files_per_task"]}
-
-# Dataset selection (documenting what the tuner used)
-BEST_ROOT    = r"{best["root"]}"
-BEST_PATTERN = "{best["pattern"]}"
-BEST_MIN_B   = {best["min_bytes"]}
-BEST_MAX_B   = {best["max_bytes"]}
-BEST_LIMIT   = {best["limit"]}
-BEST_SHUFFLE = {str(best["shuffle"])}
-
-POSIX_FADV = {{"SEQUENTIAL":2,"RANDOM":1,"WILLNEED":3,"DONTNEED":4}}
-
-def _read_osread(path: Path):
-    flags = os.O_RDONLY | (getattr(os, "O_NOATIME", 0) if BEST_USE_NOATIME else 0)
-    fd = os.open(path, flags)
-    try:
-        if BEST_FADVISE != "NONE" and hasattr(os, "posix_fadvise"):
-            os.posix_fadvise(fd, 0, 0, POSIX_FADV[BEST_FADVISE])
-        out = bytearray()
-        buf = bytearray(BEST_BUFSIZE); mv = memoryview(buf)
-        while True:
-            n = os.read(fd, mv)
-            if not n: break
-            out += mv[:n]
-        return bytes(out)
-    finally:
-        try:
-            if hasattr(os, "posix_fadvise"):
-                os.posix_fadvise(fd, 0, 0, POSIX_FADV["DONTNEED"])
-        except Exception:
-            pass
-        os.close(fd)
-
-def _read_readinto(path: Path):
-    flags = os.O_RDONLY | (getattr(os, "O_NOATIME", 0) if BEST_USE_NOATIME else 0)
-    fd = os.open(path, flags); f = os.fdopen(fd, "rb", closefd=False)
-    try:
-        if BEST_FADVISE != "NONE" and hasattr(os, "posix_fadvise"):
-            os.posix_fadvise(fd, 0, 0, POSIX_FADV[BEST_FADVISE])
-        out = bytearray()
-        buf = bytearray(BEST_BUFSIZE); mv = memoryview(buf)
-        while True:
-            n = f.readinto(mv)
-            if not n: break
-            out += mv[:n]
-        return bytes(out)
-    finally:
-        try:
-            if hasattr(os, "posix_fadvise"):
-                os.posix_fadvise(fd, 0, 0, POSIX_FADV["DONTNEED"])
-        except Exception:
-            pass
-        f.close()
-
-def _read_mmap(path: Path):
-    flags = os.O_RDONLY | (getattr(os, "O_NOATIME", 0) if BEST_USE_NOATIME else 0)
-    fd = os.open(path, flags)
-    try:
-        if BEST_FADVISE != "NONE" and hasattr(os, "posix_fadvise"):
-            os.posix_fadvise(fd, 0, 0, POSIX_FADV[BEST_FADVISE])
-        st = os.fstat(fd)
-        if st.st_size == 0: return b""
-        import mmap
-        mm = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
-        try:
-            data = mm[:]
-        finally:
-            mm.close()
-        return data
-    finally:
-        try:
-            if hasattr(os, "posix_fadvise"):
-                os.posix_fadvise(fd, 0, 0, POSIX_FADV["DONTNEED"])
-        except Exception: pass
-        os.close(fd)
-
-READERS = {{
-    "osread": _read_osread,
-    "readinto": _read_readinto,
-    "mmap": _read_mmap
-}}
-
-def fast_read_many(paths: list[Path]) -> list[bytes]:
-    reader = READERS.get(BEST_METHOD, _read_osread)
-    batches = [paths[i:i+BEST_FILES_PER_TASK] for i in range(0, len(paths), BEST_FILES_PER_TASK)]
-    from threading import Semaphore
-    sem = Semaphore(BEST_MAX_INFLIGHT if BEST_MAX_INFLIGHT>0 else len(batches))
-    out = [None]*len(paths)
-
-    def task(batch_idx, batch):
-        with sem:
-            result = []
-            for p in batch:
-                result.append(reader(Path(p)))
-            return batch_idx, result
-
-    with ThreadPoolExecutor(max_workers=BEST_THREADS) as ex:
-        futs = [ex.submit(task, i, b) for i, b in enumerate(batches)]
-        cursor = 0
-        for fu in as_completed(futs):
-            idx, res = fu.result()
-            for data in res:
-                out[cursor] = data; cursor += 1
-    return out
-'''
-    with open(Config.BEST_SNIPPET, "w") as f:
-        f.write(code)
 
 # ---------- CLI (args override env which override Config defaults) ----------
-def _parse_cli():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", type=str, default=None, help="Root directory to scan (overrides SFA_ROOT/Config)")
-    ap.add_argument("--pattern", default=None, help="Glob pattern, e.g. '*.wav'")
-    ap.add_argument("--min-bytes", type=int, default=None)
-    ap.add_argument("--max-bytes", type=int, default=None)
-    ap.add_argument("--limit", type=int, default=None, help="Limit files (0 = all)")
-    ap.add_argument("--shuffle", type=str, default=None, help="true/false to override shuffling")
+def _parse_cli() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    ap = argparse.ArgumentParser(
+        description="Small-file disk read auto-tuner for Linux (ext4-friendly)"
+    )
+    ap.add_argument("--root", type=str, default=None, 
+                    help="Root directory to scan (overrides SFA_ROOT/Config)")
+    ap.add_argument("--pattern", default=None, 
+                    help="Glob pattern, e.g. '*.wav'")
+    ap.add_argument("--min-bytes", type=int, default=None,
+                    help="Minimum file size in bytes")
+    ap.add_argument("--max-bytes", type=int, default=None,
+                    help="Maximum file size in bytes")
+    ap.add_argument("--limit", type=int, default=None, 
+                    help="Limit number of files (0 = all)")
+    ap.add_argument("--shuffle", type=str, default=None, 
+                    help="true/false to override shuffling")
+    ap.add_argument("--no-json", action="store_true", dest="no_json",
+                    help="Skip JSON output")
+    ap.add_argument("--no-text", action="store_true", dest="no_text",
+                    help="Skip text output")
+    ap.add_argument("--verbose", action="store_true", dest="verbose",
+                    help="Enable verbose output")
     return ap.parse_args()
 
-def main():
+def main() -> None:
+    """Main entry point for the disk tuning application."""
     args = _parse_cli()
-    # convert shuffle str to bool if provided
-    shuffle = None
+    
+    # Apply CLI overrides to Config
+    if args.no_json:
+        Config.WRITE_JSON = False
+    if args.no_text:
+        Config.WRITE_TEXT = False
+    if args.verbose:
+        Config.VERBOSE = True
+        logger.setLevel(logging.DEBUG)
+    
+    # Convert shuffle str to bool if provided
+    shuffle: Optional[bool] = None
     if args.shuffle is not None:
         s = args.shuffle.strip().lower()
         shuffle = s in ("1", "true", "yes", "y", "on")
+    
     autotune_best_config(
         root=args.root if args.root is not None else None,
         pattern=args.pattern if args.pattern is not None else None,
