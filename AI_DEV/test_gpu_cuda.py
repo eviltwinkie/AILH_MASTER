@@ -170,6 +170,14 @@ CC_CUDA_TF_RECOMMEND = {
     12.0: ("12.8.1", "2.20.0"),  # Blackwell
 }
 
+# FP8 support by compute capability
+FP8_SUPPORT = {
+    8.6: False,      # Ampere - no native FP8
+    8.9: False,      # Ada - no native FP8
+    9.0: "partial",  # Hopper - limited FP8 (structured sparsity)
+    12.0: True,      # Blackwell - full native FP8 support
+}
+
 # Base stress iterations (we use shapes adapted to GPU) — per your request
 STRESS_ITERS = 10
 
@@ -177,6 +185,9 @@ STRESS_ITERS = 10
 GEMM_SIZE_DEFAULT = 12288
 GEMM_ITERS_DEFAULT = 10
 GEMM_WARMUP_DEFAULT = 3
+
+# FP8 dtype configuration
+ENABLE_FP8_TESTS = os.environ.get("GPU_FP8_TESTS", "1").lower() in ("1", "true", "yes", "on")
 
 # =============================================================================
 # UTILS
@@ -217,6 +228,52 @@ def run_cmd(cmd: List[str]) -> Optional[str]:
 def human_tflops(flops_per_second: float) -> str:
     """Format FLOPs/s into TFLOP/s with 2 decimals."""
     return f"{flops_per_second / 1e12:0.2f} TFLOP/s"
+
+def check_torch_fp8_support() -> Tuple[bool, bool]:
+    """
+    Check if PyTorch supports FP8 dtypes (float8_e4m3fn, float8_e5m2).
+    Returns (e4m3fn_supported: bool, e5m2_supported: bool)
+    """
+    if torch is None:
+        return False, False
+    
+    try:
+        # Check for torch.float8_e4m3fn (E4M3 format)
+        e4m3fn_ok = hasattr(torch, 'float8_e4m3fn')
+        # Check for torch.float8_e5m2 (E5M2 format)
+        e5m2_ok = hasattr(torch, 'float8_e5m2')
+        return e4m3fn_ok, e5m2_ok
+    except Exception:
+        return False, False
+
+def get_blackwell_fp8_status(gpu_inventory: List[Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
+    """
+    Detect Blackwell GPU (CC 12.0) and FP8 support.
+    Returns (is_blackwell: bool, gpu_name: Optional[str])
+    
+    Handles both compute capability formats:
+    - Float format: compute_cap = 12.0 (from nvidia-smi)
+    - Dict format: compute_capability = {"major": 12, "minor": 0} (from PyTorch)
+    """
+    if not gpu_inventory:
+        return False, None
+    
+    for gpu in gpu_inventory:
+        # Try float format first (compute_cap from nvidia-smi)
+        cc_float = gpu.get("compute_cap")
+        if cc_float is not None and isinstance(cc_float, (int, float)):
+            cc_major = int(cc_float)  # e.g., 12.0 -> 12
+            if cc_major == 12:
+                return True, gpu.get("name", "Blackwell")
+        
+        # Fall back to dict format (compute_capability from PyTorch)
+        cc_dict = gpu.get("compute_capability", {})
+        if isinstance(cc_dict, dict):
+            cc_major = cc_dict.get("major", 0)
+            if cc_major == 12:
+                return True, gpu.get("name", "Blackwell")
+    
+    return False, None
 
 
 def compute_gemm_flops(n: int, m: int, k: int) -> float:
@@ -323,6 +380,115 @@ def run_cupy_suite(
     results["fp16_tflops"] = bench_gemm(cp.float16, "fp16")
 
     return results
+
+def build_tensorrt_fp8_engine(gpu_inventory: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Build a TensorRT FP8 engine (Blackwell/CC 12.0+ only).
+    Returns dict with build status and metrics.
+    Handles both TRT 8/9 and TRT 10 API variations.
+    """
+    results = {
+        "fp8_engine_built": False,
+        "fp8_build_time_ms": None,
+        "fp8_reason": "Not attempted",
+    }
+
+    if not ENABLE_FP8_TESTS:
+        results["fp8_reason"] = "FP8 tests disabled (GPU_FP8_TESTS=0)"
+        return results
+
+    if trt is None:
+        results["fp8_reason"] = "TensorRT not installed"
+        return results
+
+    # Check for Blackwell
+    is_blackwell, gpu_name = get_blackwell_fp8_status(gpu_inventory)
+    if not is_blackwell:
+        results["fp8_reason"] = "No Blackwell GPU detected (FP8 requires CC 12.0+)"
+        return results
+
+    engine = None  # Initialize to avoid potential unbound variable
+
+    try:
+        hr("TensorRT FP8 Engine Build (Blackwell)")
+        
+        # Use correct Severity enum (older TRT uses trt.Logger.WARNING, newer uses trt.Logger.Severity.WARNING)
+        if hasattr(trt.Logger, "Severity"):  # type: ignore
+            logger = trt.Logger(trt.Logger.Severity.WARNING)  # type: ignore
+        else:
+            logger = trt.Logger(trt.Logger.WARNING)  # type: ignore
+        
+        builder = trt.Builder(logger)  # type: ignore
+        
+        # Create network with EXPLICIT_BATCH flag if available
+        if hasattr(trt, "NetworkDefinitionCreationFlag"):  # pylint: disable=no-member
+            network_flags = int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)  # type: ignore
+            network = builder.create_network(flags=network_flags)
+        else:
+            network = builder.create_network()
+
+        # Create builder config
+        config = builder.create_builder_config()
+
+        # Set FP8 precision flag if available
+        fp8_flag_set = False
+        if hasattr(trt, "BuilderFlag") and hasattr(trt.BuilderFlag, "FP8"):  # type: ignore
+            try:
+                config.set_flag(trt.BuilderFlag.FP8)  # type: ignore
+                fp8_flag_set = True
+                print_status(True, "FP8 precision flag enabled in TensorRT builder")
+            except Exception as e:
+                print_status(False, f"Could not set FP8 flag: {e}")
+
+        if not fp8_flag_set:
+            print_status(False, "FP8 flag not available in this TensorRT version")
+
+        # Create simple identity network
+        float_dtype = _trt_float_dtype()
+        input_tensor = network.add_input(
+            name="input",
+            dtype=float_dtype,
+            shape=(1, 3, 224, 224),
+        )
+
+        # Identity layer
+        identity_layer = network.add_identity(input_tensor)
+        identity_layer.get_output(0).name = "output_fp8"
+        network.mark_output(identity_layer.get_output(0))
+
+        print(f"Building TensorRT FP8 identity engine on {gpu_name}...")
+        
+        t0 = time.time()
+        
+        # Try new serialization API first, fall back to legacy if not available
+        if hasattr(builder, "build_serialized_network"):
+            engine_bytes = builder.build_serialized_network(network, config)
+            runtime = trt.Runtime(logger)  # type: ignore
+            engine = runtime.deserialize_cuda_engine(engine_bytes)
+        else:
+            # Legacy API
+            engine = builder.build_engine(network, config)
+        
+        t1 = time.time()
+        build_time_ms = (t1 - t0) * 1000.0
+
+        if engine is None:
+            results["fp8_reason"] = "Builder returned None (likely missing FP8 support)"
+            print_status(False, "Engine build returned None")
+            return results
+
+        results["fp8_engine_built"] = True
+        results["fp8_build_time_ms"] = build_time_ms
+        results["fp8_reason"] = "Success"
+        
+        print_status(True, f"FP8 Engine built successfully. Build time: {build_time_ms:.2f} ms")
+
+    except Exception as e:
+        results["fp8_reason"] = f"Exception: {type(e).__name__}: {str(e)}"
+        print_status(False, f"FP8 engine build failed: {e}")
+
+    return results
+
 
 # =============================================================================
 # TENSORRT SMOKE TEST + MICRO-BENCHMARK (TRT 8/9/10 COMPATIBLE)
@@ -1720,6 +1886,98 @@ def run_tensorflow_suite(gpus, gpu_info: Optional[Dict[str, Any]]) -> Dict[str, 
     return results
 
 
+def run_pytorch_fp8_smoke_test(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    PyTorch FP8 smoke test (float8_e4m3fn and float8_e5m2).
+    Only runs on GPUs with compute capability >= 12.0 (Blackwell).
+    Returns dict with test results.
+    """
+    results = {
+        "installed": torch is not None,
+        "fp8_available": False,
+        "e4m3fn_ok": False,
+        "e5m2_ok": False,
+        "gpu_e4m3fn_ok": False,
+        "gpu_e5m2_ok": False,
+    }
+
+    if torch is None:
+        print_status(False, "PyTorch not installed; skipping FP8 smoke test")
+        return results
+
+    hr("PyTorch FP8 Smoke Test (Blackwell/CC 12.0+)")
+
+    # Check dtype support
+    e4m3fn_ok, e5m2_ok = check_torch_fp8_support()
+    results["e4m3fn_ok"] = e4m3fn_ok
+    results["e5m2_ok"] = e5m2_ok
+
+    if not (e4m3fn_ok or e5m2_ok):
+        print_status(False, "PyTorch FP8 dtypes not available (requires PyTorch >= 2.1 with FP8 support)")
+        return results
+
+    print_status(True, "PyTorch FP8 dtypes available")
+    if e4m3fn_ok:
+        print(f"  {SUCCESS_SYMBOL} float8_e4m3fn (E4M3 format)")
+    if e5m2_ok:
+        print(f"  {SUCCESS_SYMBOL} float8_e5m2 (E5M2 format)")
+
+    if not torch.cuda.is_available():
+        print_status(False, "CUDA not available; skipping GPU FP8 tests")
+        return results
+
+    # Check GPU support
+    is_blackwell, gpu_name = get_blackwell_fp8_status([gpu_info] if gpu_info else [])
+    if not is_blackwell:
+        cc = gpu_info.get("compute_capability", {}) if gpu_info else {}
+        cc_major = cc.get("major", 0)
+        print_status(False, f"GPU CC {cc_major}.x detected; FP8 requires CC 12.0+ (Blackwell)")
+        return results
+
+    print_status(True, f"Blackwell GPU detected: {gpu_name}")
+
+    # Test FP8 operations on GPU
+    device = torch.device("cuda:0")
+    try:
+        if e4m3fn_ok:
+            x = torch.randn(32, 32, device=device, dtype=torch.float32)
+            x_fp8 = x.to(torch.float8_e4m3fn)
+            y = torch.ones_like(x, device=device, dtype=torch.float32)
+            y_fp8 = y.to(torch.float8_e4m3fn)
+            
+            torch.cuda.synchronize()
+            t0 = time.time()
+            z = x_fp8.to(torch.float32) @ y_fp8.to(torch.float32)
+            torch.cuda.synchronize()
+            t1 = time.time()
+            
+            print_status(True, f"float8_e4m3fn GPU operations OK ({(t1-t0)*1000:.2f} ms)")
+            results["gpu_e4m3fn_ok"] = True
+    except Exception as e:
+        print_status(False, f"float8_e4m3fn GPU operations failed: {repr(e)}")
+
+    try:
+        if e5m2_ok:
+            x = torch.randn(32, 32, device=device, dtype=torch.float32)
+            x_fp8 = x.to(torch.float8_e5m2)
+            y = torch.ones_like(x, device=device, dtype=torch.float32)
+            y_fp8 = y.to(torch.float8_e5m2)
+            
+            torch.cuda.synchronize()
+            t0 = time.time()
+            z = x_fp8.to(torch.float32) @ y_fp8.to(torch.float32)
+            torch.cuda.synchronize()
+            t1 = time.time()
+            
+            print_status(True, f"float8_e5m2 GPU operations OK ({(t1-t0)*1000:.2f} ms)")
+            results["gpu_e5m2_ok"] = True
+    except Exception as e:
+        print_status(False, f"float8_e5m2 GPU operations failed: {repr(e)}")
+
+    results["fp8_available"] = results["gpu_e4m3fn_ok"] or results["gpu_e5m2_ok"]
+    return results
+
+
 def run_pytorch_suite(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     hr("PyTorch Diagnostics + Stress Suite")
 
@@ -1986,8 +2244,98 @@ def run_pytorch_suite(gpu_info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =============================================================================
-# NVMath / GEMM BENCHMARK SUITE (NumPy, PyTorch, NVMath; fp32 + fp16)
-# =============================================================================
+def bench_torch_gemm_fp8(n: int, iters: int, warmup: int) -> Dict[str, float]:
+    """
+    Benchmark PyTorch GEMM with FP8 dtypes (float8_e4m3fn, float8_e5m2).
+    Only runs on GPUs with CC >= 12.0 (Blackwell).
+    Returns dict with TFLOP/s for each dtype, or NaN if not supported.
+    """
+    results = {"fp8_e4m3fn_tflops": float("nan"), "fp8_e5m2_tflops": float("nan")}
+
+    if torch is None or not torch.cuda.is_available():
+        return results
+
+    if not ENABLE_FP8_TESTS:
+        return results
+
+    e4m3fn_ok, e5m2_ok = check_torch_fp8_support()
+    if not (e4m3fn_ok or e5m2_ok):
+        return results
+
+    device = torch.device("cuda:0")
+
+    # Bench float8_e4m3fn
+    if e4m3fn_ok:
+        try:
+            print(f"\n[PyTorch FP8] GEMM benchmark (GPU) — float8_e4m3fn, "
+                  f"size={n}x{n}, iters={iters}, warmup={warmup}")
+
+            A = torch.randn(n, n, device=device, dtype=torch.float32).to(torch.float8_e4m3fn)
+            B = torch.randn(n, n, device=device, dtype=torch.float32).to(torch.float8_e4m3fn)
+
+            # Warmup
+            for _ in range(warmup):
+                C = A.to(torch.float32) @ B.to(torch.float32)
+                torch.cuda.synchronize()
+
+            flops_per_iter = compute_gemm_flops(n, n, n)
+
+            torch.cuda.synchronize()
+            t0 = time.time()
+            for _ in range(iters):
+                C = A.to(torch.float32) @ B.to(torch.float32)
+            torch.cuda.synchronize()
+            t1 = time.time()
+
+            elapsed = t1 - t0
+            if elapsed > 0:
+                total_flops = flops_per_iter * iters
+                flops_per_sec = total_flops / elapsed
+                results["fp8_e4m3fn_tflops"] = flops_per_sec
+                print(f"  Total time: {elapsed * 1000.0:0.2f} ms")
+                print(f"  Per-iter time: {elapsed * 1000.0 / iters:0.2f} ms")
+                print(f"  Average rate: {human_tflops(flops_per_sec)}")
+        except Exception as e:
+            print_status(False, f"PyTorch FP8 E4M3 GEMM failed: {repr(e)}")
+
+    # Bench float8_e5m2
+    if e5m2_ok:
+        try:
+            print(f"\n[PyTorch FP8] GEMM benchmark (GPU) — float8_e5m2, "
+                  f"size={n}x{n}, iters={iters}, warmup={warmup}")
+
+            A = torch.randn(n, n, device=device, dtype=torch.float32).to(torch.float8_e5m2)
+            B = torch.randn(n, n, device=device, dtype=torch.float32).to(torch.float8_e5m2)
+
+            # Warmup
+            for _ in range(warmup):
+                C = A.to(torch.float32) @ B.to(torch.float32)
+                torch.cuda.synchronize()
+
+            flops_per_iter = compute_gemm_flops(n, n, n)
+
+            torch.cuda.synchronize()
+            t0 = time.time()
+            for _ in range(iters):
+                C = A.to(torch.float32) @ B.to(torch.float32)
+            torch.cuda.synchronize()
+            t1 = time.time()
+
+            elapsed = t1 - t0
+            if elapsed > 0:
+                total_flops = flops_per_iter * iters
+                flops_per_sec = total_flops / elapsed
+                results["fp8_e5m2_tflops"] = flops_per_sec
+                print(f"  Total time: {elapsed * 1000.0:0.2f} ms")
+                print(f"  Per-iter time: {elapsed * 1000.0 / iters:0.2f} ms")
+                print(f"  Average rate: {human_tflops(flops_per_sec)}")
+        except Exception as e:
+            print_status(False, f"PyTorch FP8 E5M2 GEMM failed: {repr(e)}")
+
+    return results
+
+
+
 
 def bench_numpy_gemm(n: int, dtype: str, iters: int, warmup: int) -> float:
     """
@@ -2342,6 +2690,11 @@ def main() -> None:
             action="store_true",
             help="Skip smoke tests (functional tests for TF/PyTorch/etc.)",
         )
+        parser.add_argument(
+            "--no-fp8",
+            action="store_true",
+            help="Skip FP8 tests (Blackwell GPU only; requires ENABLE_FP8_TESTS env var)",
+        )
         args = parser.parse_args()
 
         gemm_size = args.gemm_size
@@ -2349,6 +2702,7 @@ def main() -> None:
         gemm_warmup = args.gemm_warmup
         use_numpy_gemm = not args.no_numpy_gemm
         run_smoke_tests = not args.no_smoke_tests and ENABLE_SMOKE_TESTS
+        run_fp8_tests = not args.no_fp8 and ENABLE_FP8_TESTS
 
         print_nvidia_driver()
         print_cuda_path()
@@ -2382,6 +2736,16 @@ def main() -> None:
                 warmup=gemm_warmup,
             )
             tensorrt_results = run_tensorrt_suite()
+            
+            # FP8 tests (Blackwell GPU only)
+            if run_fp8_tests:
+                pytorch_fp8_results = run_pytorch_fp8_smoke_test(gpu0_info)
+                fp8_gemm_results = bench_torch_gemm_fp8(n=gemm_size, iters=gemm_iters, warmup=gemm_warmup)
+                tensorrt_fp8_results = build_tensorrt_fp8_engine(gpu_inventory)
+            else:
+                pytorch_fp8_results = {"tested": False, "reason": "FP8 tests disabled (--no-fp8 or GPU_FP8_TESTS=0)"}
+                fp8_gemm_results = {"tested": False, "reason": "FP8 tests disabled (--no-fp8 or GPU_FP8_TESTS=0)"}
+                tensorrt_fp8_results = {"tested": False, "reason": "FP8 tests disabled (--no-fp8 or GPU_FP8_TESTS=0)"}
         else:
             hr("Smoke Tests Skipped")
             print_status(True, "Smoke tests disabled (--no-smoke-tests or GPU_SMOKE_TESTS=0)")
@@ -2389,6 +2753,9 @@ def main() -> None:
             torch_results = {"installed": torch is not None}
             cupy_results = {"installed": cp is not None}
             tensorrt_results = {"installed": trt is not None}
+            pytorch_fp8_results = {"tested": False, "reason": "Smoke tests disabled"}
+            fp8_gemm_results = {"tested": False, "reason": "Smoke tests disabled"}
+            tensorrt_fp8_results = {"tested": False, "reason": "Smoke tests disabled"}
 
         # GEMM benchmarks (NumPy / PyTorch / NVMath)
         if not args.no_gemm:
@@ -2450,6 +2817,31 @@ def main() -> None:
             build_ms = tensorrt_results.get('build_time_ms', 'N/A')
             infer_ms = tensorrt_results.get('inference_time_ms', 'N/A')
             print(format_result("Engine Built", True, f"build={build_ms}ms / infer={infer_ms}ms"))
+        
+        # FP8 Results (if available)
+        if run_fp8_tests:
+            print("\nFP8 Capabilities (Blackwell GPU):")
+            
+            # PyTorch FP8 smoke test
+            fp8_torch_ok = pytorch_fp8_results.get('fp8_torch_ok', False)
+            print(format_result("PyTorch FP8 Smoke Test", fp8_torch_ok))
+            
+            # FP8 GEMM benchmark
+            fp8_gemm_ok = fp8_gemm_results.get('fp8_gemm_ok', False)
+            if fp8_gemm_ok:
+                e4m3_tflops = fp8_gemm_results.get('e4m3fn_tflops', 'N/A')
+                e5m2_tflops = fp8_gemm_results.get('e5m2_tflops', 'N/A')
+                print(format_result("FP8 GEMM Benchmark", True, f"E4M3={e4m3_tflops} / E5M2={e5m2_tflops}"))
+            else:
+                print(format_result("FP8 GEMM Benchmark", False))
+            
+            # TensorRT FP8 engine
+            fp8_trt_ok = tensorrt_fp8_results.get('fp8_engine_built', False)
+            if fp8_trt_ok:
+                trt_build_ms = tensorrt_fp8_results.get('fp8_build_time_ms', 'N/A')
+                print(format_result("TensorRT FP8 Engine", True, f"build={trt_build_ms}ms"))
+            else:
+                print(format_result("TensorRT FP8 Engine", False))
         
         print("\n" + "=" * 80)
         print("✓ Diagnostics Complete")

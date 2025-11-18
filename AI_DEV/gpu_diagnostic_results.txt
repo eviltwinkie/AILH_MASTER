@@ -54,11 +54,11 @@ GPU[0] NVIDIA GeForce RTX 5090 Laptop GPU
   PCI Bus ID:   00000000:02:00.0
   Driver Ver:   581.80
   Memory Total: 24463 MiB
-  Memory Used:  2312 MiB
-  Memory Free:  21740 MiB
+  Memory Used:  2398 MiB
+  Memory Free:  21654 MiB
   GFX Clock:    2160 MHz
   Mem Clock:    14001 MHz
-  Temperature:  49 C
+  Temperature:  56 C
   Power State:  P0
   Display:      active=Enabled mode=[Requested functionality has been deprecated]
 
@@ -393,25 +393,25 @@ CPUs visible to TF: 1
 GPUs visible to TF: 1
 
 [TF] CPU smoke tests (Conv2D, matmul, gradients)
-✅ CPU Conv2D OK. Time: 3.21 ms
-✅ CPU matmul OK. Time: 5.04 ms
-✅ CPU gradient test OK. Time: 33.23 ms
+✅ CPU Conv2D OK. Time: 2.50 ms
+✅ CPU matmul OK. Time: 4.18 ms
+✅ CPU gradient test OK. Time: 31.77 ms
 
 [TF] GPU smoke tests (Conv2D, matmul, gradients)
 Conv2D output device: /job:localhost/replica:0/task:0/device:GPU:0
-✅ GPU Conv2D OK. Time: 9.82 ms
+✅ GPU Conv2D OK. Time: 10.35 ms
 ✅ GPU matmul OK. Time: 3.46 ms
-✅ GPU gradient test OK. Time: 5.52 ms
+✅ GPU gradient test OK. Time: 5.36 ms
 
 [TF] CPU vs GPU comparison (same shapes):
-  Conv2D: CPU 3.21 ms vs GPU 9.82 ms → 0.3x faster
-  Matmul: CPU 5.04 ms vs GPU 3.46 ms → 1.5x faster
-  Gradient: CPU 33.23 ms vs GPU 5.52 ms → 6.0x faster
+  Conv2D: CPU 2.50 ms vs GPU 10.35 ms → 0.2x faster
+  Matmul: CPU 4.18 ms vs GPU 3.46 ms → 1.2x faster
+  Gradient: CPU 31.77 ms vs GPU 5.36 ms → 5.9x faster
 
 [TF] GPU stress test (adapted, medium) — Conv2D: batch=16, H=W=384, C_in=4, C_out=64; Matmul: 12288 x 12288; Iters=10
 [TF] Conv2D work elements: 150994944 (7.55% of 2,000,000,000 limit)
-  Conv2D stress: 10 iters, total 735.59 ms, avg 73.56 ms/iter
-  Matmul stress: 10 iters, total 1420.85 ms, avg 142.09 ms/iter
+  Conv2D stress: 10 iters, total 777.00 ms, avg 77.70 ms/iter
+  Matmul stress: 10 iters, total 1376.42 ms, avg 137.64 ms/iter
 ✅ TensorFlow GPU stress test (medium) completed without errors.
 
 ================================================================================
@@ -422,28 +422,28 @@ PyTorch CUDA version: 12.8
 CUDA available: True
 
 [PyTorch] CPU smoke tests (Conv2d, matmul, gradients)
-✅ CPU Conv2d OK. Time: 31.97 ms
-✅ CPU matmul OK. Time: 24.70 ms
-✅ CPU gradient test OK. Time: 136.97 ms
+✅ CPU Conv2d OK. Time: 32.95 ms
+✅ CPU matmul OK. Time: 28.64 ms
+✅ CPU gradient test OK. Time: 122.37 ms
 
 [PyTorch] Using device: cuda:0
 GPU name: NVIDIA GeForce RTX 5090 Laptop GPU
 GPU capability: (12, 0)
 
 [PyTorch] GPU smoke tests (Conv2d, matmul, gradients)
-✅ GPU Conv2d OK. Time: 23.39 ms
+✅ GPU Conv2d OK. Time: 24.40 ms
 Conv2d output shape: (16, 32, 64, 64)
-✅ GPU matmul OK. Time: 1.60 ms
-✅ GPU gradient test OK. Time: 55.21 ms
+✅ GPU matmul OK. Time: 2.39 ms
+✅ GPU gradient test OK. Time: 55.42 ms
 
 [PyTorch] CPU vs GPU comparison (same shapes):
-  Conv2d: CPU 31.97 ms vs GPU 23.39 ms → 1.4x faster
-  Matmul: CPU 24.70 ms vs GPU 1.60 ms → 15.4x faster
-  Gradient: CPU 136.97 ms vs GPU 55.21 ms → 2.5x faster
+  Conv2d: CPU 32.95 ms vs GPU 24.40 ms → 1.4x faster
+  Matmul: CPU 28.64 ms vs GPU 2.39 ms → 12.0x faster
+  Gradient: CPU 122.37 ms vs GPU 55.42 ms → 2.2x faster
 
 [PyTorch] GPU stress test (adapted, medium) — Conv2d: N=16, C_in=4, H=W=384, C_out=64; Matmul: 12288 x 12288; Iters=10
-  Conv2d stress: 10 iters, total 120.27 ms, avg 12.03 ms/iter
-  Matmul stress: 10 iters, total 1520.84 ms, avg 152.08 ms/iter (dtype=torch.float32, size=12288x12288)
+  Conv2d stress: 10 iters, total 120.49 ms, avg 12.05 ms/iter
+  Matmul stress: 10 iters, total 1518.98 ms, avg 151.90 ms/iter (dtype=torch.float32, size=12288x12288)
 ✅ PyTorch GPU stress test (medium) completed without errors.
 
 ================================================================================
@@ -452,10 +452,10 @@ Conv2d output shape: (16, 32, 64, 64)
 ✅ CuPy sees CUDA device 0: <CUDA Device 0>
 
 [CuPy] fp32 GEMM: 12288 x 12288 @ 12288 x 12288, dtype=<class 'numpy.float32'>
-  Total time: 1470.79 ms (147.08 ms/iter), Rate: 25.23 TFLOP/s
+  Total time: 1441.07 ms (144.11 ms/iter), Rate: 25.75 TFLOP/s
 
 [CuPy] fp16 GEMM: 12288 x 12288 @ 12288 x 12288, dtype=<class 'numpy.float16'>
-  Total time: 414.65 ms (41.47 ms/iter), Rate: 89.49 TFLOP/s
+  Total time: 414.64 ms (41.46 ms/iter), Rate: 89.50 TFLOP/s
 
 ================================================================================
   TensorRT Smoke Test + Micro-Benchmark
@@ -466,9 +466,36 @@ IBuilderConfig type: <class 'tensorrt_bindings.tensorrt.IBuilderConfig'>
 Using set_memory_pool_limit(MemoryPoolType.WORKSPACE, size) API.
 Building a trivial TensorRT identity engine...
 Using builder.build_serialized_network(...) + trt.Runtime().
-✅ Engine build OK. Time: 500.61 ms
+✅ Engine build OK. Time: 476.55 ms
 Running a single inference with PyCUDA for smoke test...
-✅ Inference OK. Time: 0.27 ms
+✅ Inference OK. Time: 0.15 ms
+
+================================================================================
+  PyTorch FP8 Smoke Test (Blackwell/CC 12.0+)
+================================================================================
+✅ PyTorch FP8 dtypes available
+  ✅ float8_e4m3fn (E4M3 format)
+  ✅ float8_e5m2 (E5M2 format)
+✅ Blackwell GPU detected: NVIDIA GeForce RTX 5090 Laptop GPU
+✅ float8_e4m3fn GPU operations OK (0.25 ms)
+✅ float8_e5m2 GPU operations OK (0.08 ms)
+
+[PyTorch FP8] GEMM benchmark (GPU) — float8_e4m3fn, size=12288x12288, iters=10, warmup=3
+  Total time: 1317.64 ms
+  Per-iter time: 131.76 ms
+  Average rate: 28.16 TFLOP/s
+
+[PyTorch FP8] GEMM benchmark (GPU) — float8_e5m2, size=12288x12288, iters=10, warmup=3
+  Total time: 1321.67 ms
+  Per-iter time: 132.17 ms
+  Average rate: 28.08 TFLOP/s
+
+================================================================================
+  TensorRT FP8 Engine Build (Blackwell)
+================================================================================
+✅ FP8 precision flag enabled in TensorRT builder
+Building TensorRT FP8 identity engine on NVIDIA GeForce RTX 5090 Laptop GPU...
+✅ FP8 Engine built successfully. Build time: 291.32 ms
 
 ================================================================================
   GEMM / NVMath Benchmarks (NumPy, PyTorch, NVMath; fp32 + fp16)
@@ -482,61 +509,61 @@ Running fp32 GEMM benchmarks
 ================================================================================
 
 [NumPy] GEMM benchmark (CPU) — size=12288x12288, dtype=fp32, iters=10, warmup=3
-  Total time: 25375.98 ms
-  Per-iter time: 2537.60 ms
-  Average rate: 1.46 TFLOP/s
+  Total time: 24368.38 ms
+  Per-iter time: 2436.84 ms
+  Average rate: 1.52 TFLOP/s
 
 [PyTorch] GEMM benchmark on cuda:0 — size=12288x12288, dtype=fp32, iters=10, warmup=3
-  Total time: 1491.25 ms
-  Per-iter time: 149.13 ms
-  Average rate: 24.88 TFLOP/s
+  Total time: 1504.60 ms
+  Per-iter time: 150.46 ms
+  Average rate: 24.66 TFLOP/s
 
 [NVMath] GEMM benchmark via nvmath.linalg.advanced.matmul — size=12288x12288, dtype=fp32, iters=10, warmup=3
-  Total time: 1502.45 ms
-  Per-iter time: 150.25 ms
-  Average rate: 24.70 TFLOP/s
+  Total time: 1511.82 ms
+  Per-iter time: 151.18 ms
+  Average rate: 24.55 TFLOP/s
 
 --------------------------------------------------------------------------------
 fp32 GEMM Summary (TFLOP/s)
 --------------------------------------------------------------------------------
-NumPy (CPU):    1.46 TFLOP/s
-PyTorch (GPU):  24.88 TFLOP/s
-NVMath (GPU):   24.70 TFLOP/s
+NumPy (CPU):    1.52 TFLOP/s
+PyTorch (GPU):  24.66 TFLOP/s
+NVMath (GPU):   24.55 TFLOP/s
 
 ================================================================================
 Running fp16 GEMM benchmarks
 ================================================================================
 
 [NumPy] GEMM benchmark (CPU) — size=12288x12288, dtype=fp32 (CPU baseline for fp16), iters=10, warmup=3
-  Total time: 27032.02 ms
-  Per-iter time: 2703.20 ms
-  Average rate: 1.37 TFLOP/s
+  Total time: 23109.51 ms
+  Per-iter time: 2310.95 ms
+  Average rate: 1.61 TFLOP/s
 
 [PyTorch] GEMM benchmark on cuda:0 — size=12288x12288, dtype=fp16, iters=10, warmup=3
-  Total time: 390.29 ms
-  Per-iter time: 39.03 ms
-  Average rate: 95.08 TFLOP/s
+  Total time: 394.71 ms
+  Per-iter time: 39.47 ms
+  Average rate: 94.01 TFLOP/s
 
 [NVMath] GEMM benchmark via nvmath.linalg.advanced.matmul — size=12288x12288, dtype=fp16, iters=10, warmup=3
-  Total time: 496.18 ms
-  Per-iter time: 49.62 ms
-  Average rate: 74.79 TFLOP/s
+  Total time: 501.02 ms
+  Per-iter time: 50.10 ms
+  Average rate: 74.07 TFLOP/s
 
 --------------------------------------------------------------------------------
 fp16 GEMM Summary (TFLOP/s)
 --------------------------------------------------------------------------------
-NumPy (CPU):    1.37 TFLOP/s
-PyTorch (GPU):  95.08 TFLOP/s
-NVMath (GPU):   74.79 TFLOP/s
+NumPy (CPU):    1.61 TFLOP/s
+PyTorch (GPU):  94.01 TFLOP/s
+NVMath (GPU):   74.07 TFLOP/s
 
 ================================================================================
 Combined GEMM Summary (TFLOP/s)
 ================================================================================
 Backend              fp32         fp16    fp16/fp32
 --------------------------------------------------------------------------------
-NumPy (CPU)  1.46 TFLOP/s 1.37 TFLOP/s        0.94x
-PyTorch      24.88 TFLOP/s 95.08 TFLOP/s        3.82x
-NVMath       24.70 TFLOP/s 74.79 TFLOP/s        3.03x
+NumPy (CPU)  1.52 TFLOP/s 1.61 TFLOP/s        1.05x
+PyTorch      24.66 TFLOP/s 94.01 TFLOP/s        3.81x
+NVMath       24.55 TFLOP/s 74.07 TFLOP/s        3.02x
 
 GEMM benchmarks done.
 
@@ -550,7 +577,7 @@ ptxas --version output:
   Built on Fri_Feb_21_20:21:21_PST_2025
   Cuda compilation tools, release 12.8, V12.8.93
   Build cuda_12.8.r12.8/compiler.35583870_0
-✅ ptxas version query OK. Time: 1.92 ms
+✅ ptxas version query OK. Time: 1.81 ms
 
 ================================================================================
   Resource / Parallelism Suggestion
@@ -630,11 +657,16 @@ PyTorch:
 
 CuPy:
   ✅ Installed
-  ✅ CUDA Available | fp32=25.230405429331793 / fp16=89.49303270216829
+  ✅ CUDA Available | fp32=25.75065965121522 / fp16=89.4964289968072
 
 TensorRT:
   ✅ Installed
-  ✅ Engine Built | build=500.6067752838135ms / infer=0.2675056457519531ms
+  ✅ Engine Built | build=476.5470027923584ms / infer=0.1518726348876953ms
+
+FP8 Capabilities (Blackwell GPU):
+  ❌ PyTorch FP8 Smoke Test
+  ❌ FP8 GEMM Benchmark
+  ✅ TensorRT FP8 Engine | build=291.3227081298828ms
 
 ================================================================================
 ✓ Diagnostics Complete
