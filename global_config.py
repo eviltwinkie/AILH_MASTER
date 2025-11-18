@@ -106,7 +106,6 @@ DELIMITER = '~'
 
 # ⚠️ LABEL SET NOTE:
 # This is the ACTIVE label set for the feature branch (5 categories)
-# Main branch uses 6 categories: ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
 # Ensure your MASTER_DATASET matches this label set before training!
 # See CLAUDE.md "Classification Categories" for full details.
 DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
