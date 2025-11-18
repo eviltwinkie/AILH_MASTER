@@ -12,14 +12,30 @@
 - **ML Frameworks**: TensorFlow 2.20.0 (self-built!), PyTorch 2.9.1, Keras
 - **Optimization Level**: Production-grade with extensive GPU acceleration (CUDA)
 
+### ⚠️ CRITICAL: Configuration Discrepancies Detected
+
+**MAJOR ISSUE**: `global_config.py` parameters are NOT used by most scripts! Each script has hardcoded parameters:
+
+| Parameter | global_config.py | Actual Implementation |
+|-----------|------------------|---------------------|
+| **N_FFT** | 256 | **512** (classifiers, pipeline) |
+| **HOP_LENGTH** | 32 | **128** (classifiers, pipeline) |
+| **N_MELS** | 64 | **32-64** (varies by script) |
+| **power** | Not defined | **1.0 or 2.0** (affects dB calculation!) |
+
+**⚠️ BROKEN CODE**: `cnn_mel_processor.py` imports variables from `old_config.py` that don't exist - **will crash on import!**
+
 ### Signal Processing Workflow
 1. **Input**: 10-second audio samples at 4096 Hz from hydrophone sensors (0-200dB gain)
-2. **Segmentation**: Two-stage temporal segmentation
-   - Long-term: 0.125s, 0.25s, 0.5s, 0.75s, 1.0s
-   - Short-term: 64, 128, 256, 512, 1024 points
-3. **Transform**: Convert to Mel spectrograms (64 mels, 256 FFT, hop=32)
+2. **Segmentation**: Overlapping windowing approach (NOT multiple segment sizes!)
+   - Long window: 1024 points (0.25s @ 4096Hz) with 50% overlap
+   - Short window: 512 points with 50% overlap
+   - **Note**: Documentation in README.md describes multi-size segmentation, but code uses single-size overlapping windows
+3. **Transform**: Convert to Mel spectrograms
+   - **Actual parameters**: N_FFT=512, HOP_LENGTH=128, N_MELS=32-64, power=1.0-2.0
+   - norm='slaney', mel_scale='htk', fmin=20Hz, center=False
 4. **Classify**: CNN model outputs classification probabilities
-5. **Decision**: Voting mechanism on long-term segments (≥50% = leak)
+5. **Decision**: Multiple voting strategies available (mean, long_vote, any_long, frac_vote)
 6. **Learn**: Incremental learning with confidence thresholds (0.8)
 
 ### Classification Categories
@@ -120,6 +136,42 @@ AILH_MASTER/                   (51 Python files, ~20,000 lines)
   - **Note**: `pipeline.py` in AI_ATTIC is **146 lines shorter** - use AI_DEV version
 - **FCS_UTILS**: External data fetching - standalone module
 - **UTILITIES**: Shared tools - used by both AI_DEV and FCS_UTILS
+
+---
+
+## Development Environment Paths
+
+**IMPORTANT**: Multiple scripts use hardcoded `/DEVELOPMENT/` paths not configurable via `global_config.py`:
+
+```
+/DEVELOPMENT/
+├── ROOT_AILH/
+│   ├── AILH_LOGS/              # Logs directory (FCS, old_config.py)
+│   ├── AILH_CACHE/             # Cache directory (old_config.py)
+│   ├── AILH_TMP/               # Temp directory (old_config.py)
+│   ├── DATA_SENSORS/           # FCS DataGate downloads
+│   └── DATA_STORE/             # Training data and memmaps
+│       ├── MEMMAPS/            # Memory-mapped arrays (pipeline.py)
+│       └── TRAINING/           # Training datasets (pipeline.py)
+└── DATASET_REFERENCE/          # Dataset and model storage
+    ├── INFERENCE/              # Inference inputs
+    ├── TESTING/                # Test datasets
+    ├── MODELS/                 # Model checkpoints
+    │   ├── best.pth
+    │   ├── cnn_model_best.h5
+    │   └── cnn_model_full.h5
+    ├── reports/                # Classification reports
+    ├── TRAINING_DATASET.H5
+    ├── VALIDATION_DATASET.H5
+    └── TESTING_DATASET.H5
+```
+
+**Scripts using hardcoded paths**:
+- `pipeline.py` → `/DEVELOPMENT/ROOT_AILH/DATA_STORE/`
+- `datagate_sync.py` → `/DEVELOPMENT/ROOT_AILH/AILH_LOGS`, `/DEVELOPMENT/ROOT_AILH/DATA_SENSORS`
+- `old_config.py` → `/DEVELOPMENT/ROOT_AILH/` (all subdirectories)
+- `dataset_classifier.py` → `/DEVELOPMENT/DATASET_REFERENCE` (default)
+- `leak_directory_classifier.py` → `/DEVELOPMENT/DATASET_REFERENCE` (hardcoded)
 
 ---
 
@@ -269,6 +321,17 @@ RAM_PREFETCH_DEPTH = 12
 FILES_PER_TASK = 4096        # AI_DEV (vs 192 in AI_ATTIC)
 ```
 
+**Batch Size Variations Across Scripts**:
+```python
+CNN_BATCH_SIZE = 64                    # global_config.py - Training
+batch_segments = 2048                  # dataset_classifier.py - Classification
+BATCH_SEGMENTS = 16384                 # leak_directory_classifier.py - Batch classification (8x larger!)
+GPU_BATCH_SIZE = 256                   # pipeline.py - GPU mel computation
+batch_size = 512                       # cnn_mel_processor.py - Streaming extraction
+```
+
+**⚠️ Note**: Each script has different optimal batch sizes based on its specific memory/performance requirements. Do NOT assume they should all use the same value.
+
 **File Delimiter**:
 ```python
 DELIMITER = '~'  # Used in all filename parsing
@@ -409,24 +472,10 @@ python cnn_mel_trainer.py \
 
 **Purpose**: Classify WAV files using trained model
 
+#### A. dataset_classifier.py (CLI-configurable, advanced options)
+
 ```bash
-# Single file classification
-python dataset_classifier.py \
-    --model ../OUTPUT/model.keras \
-    --input sensor_001~rec_123~20240118_143022~45.wav \
-    --output results.json \
-    --verbose
-
-# Batch directory classification
-python leak_directory_classifier.py \
-    --model ../OUTPUT/model.keras \
-    --input ../SENSOR_DATA/RAW_SIGNALS \
-    --output ../OUTPUT/classifications.json \
-    --workers 8 \
-    --verbose \
-    --svg
-
-# Advanced classification with decision rules
+# Recommended settings for maximum recall
 python dataset_classifier.py \
     --stage-dir /DEVELOPMENT/DATASET_REFERENCE \
     --in-dir /DEVELOPMENT/DATASET_REFERENCE/INFERENCE/LEAK \
@@ -434,18 +483,67 @@ python dataset_classifier.py \
     --decision frac_vote \
     --long-frac 0.25 \
     --thr 0.35 \
-    --out leak_report.csv
+    --out leak_report.csv \
+    --batch-segments 2048
+
+# Single file classification
+python dataset_classifier.py \
+    --stage-dir /DEVELOPMENT/DATASET_REFERENCE \
+    --in-dir /path/to/file.wav \
+    --out results.csv
 ```
 
-**Decision Rules Available**:
-- `mean`: Average probability across segments
-- `long_vote`: Voting on long-term segments
-- `any_long`: Any long segment predicts leak
-- `frac_vote`: Fractional voting (recommended for recall)
+**Decision Rules** (lines 284-312 of dataset_classifier.py):
+1. **`mean`**: Average leak probability across all long segments ≥ threshold
+   - Simple averaging approach
+   - Good for balanced precision/recall
+
+2. **`long_vote`**: Majority voting (≥50%) on long segments
+   - Paper-style approach
+   - Each long segment votes if mean(short segments) ≥ threshold
+
+3. **`any_long`**: ANY long segment exceeds threshold → LEAK
+   - Maximum recall, lower precision
+   - Detects even brief leak signatures
+
+4. **`frac_vote`** ⭐ **(RECOMMENDED)**: Fractional threshold voting
+   - Leak if `(segments ≥ thr) / total_segments ≥ --long-frac`
+   - Default: `--long-frac 0.25` (25% of segments must exceed threshold)
+   - Default threshold: `--thr 0.35`
+   - **Best balance for recall-first pipelines**
 
 **Probability Heads**:
-- `softmax`: Standard softmax (default)
-- `blend`: Blended probabilities
+- `softmax` (default): Standard softmax over class logits, uses P(LEAK)
+- `blend`: Average of softmax P(LEAK) + sigmoid(auxiliary_leak_logit)
+
+**CSV Output Format**:
+```
+filepath,is_leak,leak_conf_mean,per_long_probs_json,long_pos_frac,notes
+```
+
+**Config Discovery**: Automatically reads HDF5 metadata or uses fallback defaults
+
+#### B. leak_directory_classifier.py (Hardcoded config, batch processing)
+
+**⚠️ NO CLI ARGUMENTS** - Edit source code to configure:
+```python
+STAGE_DIR = Path("/DEVELOPMENT/DATASET_REFERENCE")  # Line 34
+INPUT_DIR = STAGE_DIR / "INFERENCE"  # Line 35
+OUTPUT_CSV = STAGE_DIR / "reports" / "classification_report.csv"  # Line 36
+BATCH_SEGMENTS = 16384  # Line 39 (vs 2048 in dataset_classifier!)
+```
+
+**CSV Output Format**:
+```
+filepath,predicted_label,predicted_confidence,prob_BACKGROUND,prob_CRACK,prob_LEAK,prob_NORMAL,prob_UNCLASSIFIED
+```
+
+**Differences from dataset_classifier.py**:
+- Larger batch size (16384 vs 2048)
+- Simpler CNN architecture (single-head vs dual-head)
+- Uses `soundfile` instead of `torchaudio`
+- Outputs per-class probabilities instead of voting results
+- No decision rules - direct top-1 prediction
 
 ### 4. Incremental Learning
 
@@ -673,15 +771,22 @@ pip install httpx tenacity xmltodict
 
 ### ⚠️ CRITICAL Security Warnings
 
-1. **Credentials in Plaintext**:
-   - `UTILITIES/old_config.py` contains plaintext API credentials:
+1. **TWO Sets of Credentials in Plaintext**:
+   - `UTILITIES/old_config.py` contains **TWO sets** of plaintext API credentials:
      ```python
+     # Commented out (but still in git history!)
+     #DATAGATE_USERNAME = "sbartal"
+     #DATAGATE_PASSWORD = "Sb749499houstonTX"
+
+     # Active credentials
      DATAGATE_USERNAME = "emartinez"
      DATAGATE_PASSWORD = "letmein2Umeow!!!"
      ```
+   - **CRITICAL**: Even commented credentials are recoverable from git history!
+   - **IMMEDIATELY** rotate ALL credentials if this repository has been shared
    - **NEVER** commit this file to public repositories
-   - **IMMEDIATELY** rotate these credentials if exposed
    - Use environment variables or secrets management instead
+   - Consider using `.env` files with python-dotenv (add `.env` to `.gitignore`)
 
 2. **Missing .gitignore**:
    - Repository lacks `.gitignore`
@@ -825,41 +930,90 @@ Logs: process_name.log
 
 ### API Overview
 - **Base URL**: `https://api.omnicoll.net/datagate/`
-- **Authentication**: Basic Auth (username/password)
-- **Response Format**: XML (parsed to dict)
-- **Data Organization**: site_id → sensor_id → recordings
+- **API Endpoints**:
+  - `LOGGER_URL`: `/api/loggerapi.ashx` - Get loggers and sites
+  - `RECORDINGS_URL`: `/api/recordingsapi.ashx` - List recordings
+  - `GETRECORDINGS_URL`: `/api/getrecordingsapi.ashx` - Download recordings
+- **Authentication**: Basic Auth (username/password from `old_config.py`)
+- **Response Format**: XML (parsed to dict via xmltodict)
+- **Data Organization**: Account → Site → Logger → Recordings
 
 ### Data Fetching Workflow
 
+**⚠️ Note**: `datagate_sync.py` uses hardcoded paths - no CLI arguments for configuration.
+
 ```bash
 cd FCS_UTILS
-python datagate_sync.py \
-    --output ../SENSOR_DATA/RAW_SIGNALS \
-    --start-date 2024-01-01 \
-    --end-date 2024-01-31 \
-    --verbose
+python datagate_sync.py
+```
+
+**Hardcoded Configuration** (lines 10-14):
+```python
+LOGS_DIR = "/DEVELOPMENT/ROOT_AILH/AILH_LOGS"
+DATA_SENSORS = "/DEVELOPMENT/ROOT_AILH/DATA_SENSORS"
 ```
 
 **What it does:**
 1. Connects to FCS DataGate API with credentials from `old_config.py`
-2. Fetches site/sensor hierarchy
-3. Downloads WAV files + JSON metadata for date range
-4. Organizes files by site/sensor structure
-5. Uses async/await with retry logic (exponential backoff)
-6. Saves with format: `loggerId~recordingId~timestamp~gain.wav`
+2. Fetches account hierarchy with parameters:
+   - `ShowAssociations=true`
+   - `ShowNestedLevels=true`
+   - `ShowSubAccounts=true`
+   - `SummaryOnly=false`
+3. Downloads WAV files + JSON metadata
+4. Filters for `recordingType=="3"` (audio recordings only)
+5. Date range: Last 365 days from today (UTC)
+6. Uses async/await with retry logic (exponential backoff)
+7. Incremental fetching (tracks `lastId`, deduplicates)
+8. Skips existing files automatically
+9. Saves with format: `{loggerId}~{recordingId}~{timestamp}~{gain}.wav`
+
+**Directory Structure Created**:
+```
+DATA_SENSORS/
+└── {siteId}_{siteName}_{siteStation}/
+    └── {loggerName}_{loggerId}/
+        ├── {loggerId}~{recordingId}~{timestamp}~{gain}.wav
+        └── {loggerId}~{recordingId}.json (metadata)
+```
+
+**JSON Output Files** (saved to LOGS_DIR):
+- `fcs_accounts.json`: All subaccounts
+- `fcs_loggers.json`: All loggers
+- `fcs_logger_{logger_id}_recordings.json`: Recordings per logger (incremental)
+- `fcs_api_logger.json`: Full API response
+
+**Path Sanitization**:
+```python
+re.sub(r'[<>:"/\\|?*\s]+', "_", value)  # Replaces unsafe chars with underscore
+```
+
+**Siteidtext Parsing Logic** (lines 147-177):
+Parses format: `{loggerName} {siteId} {siteName} {siteStation}`
+- Handles missing fields by replacing with "OFF"
+- Normalizes null/0/"" values
 
 ### Module Architecture
 
 **datagate_client.py** (42 lines):
-- Async HTTP client wrapper
-- Retry logic with tenacity
-- Exception handling
+```python
+@retry(
+    stop=stop_after_attempt(5),          # 5 attempts
+    wait=wait_exponential(multiplier=1, min=2, max=10),  # 2s, 4s, 8s, 10s, 10s
+    reraise=True
+)
+async def fetch_data(url, params=None):
+    # HTTP timeout: 60 seconds
+    # Returns: text for text/xml/json, bytes for binary (WAV)
+```
 
 **datagate_sync.py** (292 lines):
-- Main synchronization logic
-- Site/sensor hierarchy traversal
-- WAV + metadata download
-- File organization
+- `get_accounts()`: Fetches account hierarchy
+- `get_loggers()`: Extracts logger list
+- `get_logger_recordings_list()`: Fetches recording metadata per logger
+- `process_recording()`: Downloads and saves individual WAV + JSON
+- **Incremental update logic**: Only fetches recordings with `id > lastId`
+- **Deduplication**: Tracks seen recording IDs to avoid duplicates
 
 ---
 
@@ -1304,30 +1458,89 @@ When generating or modifying code:
 
 ---
 
+## Known Issues and Bugs
+
+### 🐛 Critical Bugs
+
+1. **cnn_mel_processor.py - Broken Imports** (CRITICAL)
+   - **Line 1**: Imports variables from `old_config.py` that don't exist
+   - Missing variables: `SAMPLE_RATE`, `N_FFT`, `HOP_LENGTH`, `N_MELS`, `LONG_TERM_SEC`, `SHORT_TERM_SEC`, `STRIDE_SEC`, `CNN_BATCH_SIZE`, `MAX_THREAD_WORKERS`, `TMPDIR`
+   - **Impact**: Script will crash immediately on import
+   - **Fix**: Either update `old_config.py` with missing variables or change imports to use `global_config.py`
+
+2. **Configuration Fragmentation**
+   - Parameters defined in `global_config.py` are NOT used by most scripts
+   - Each script has its own hardcoded FFT/Mel parameters
+   - **Impact**: Inconsistent mel spectrograms across different parts of the pipeline
+   - **Fix**: Centralize configuration and enforce imports from single source
+
+3. **Sample Rate Mismatch in old_config.py**
+   - `old_config.py` defines `DEFAULT_SAMPLING_RATE = 44100`
+   - All other code uses `SAMPLE_RATE = 4096`
+   - **Impact**: If `old_config.py` is used, severe audio processing errors
+   - **Fix**: Update `old_config.py` or deprecate it entirely
+
+### ⚠️ Runtime Errors
+
+**From leak_report.csv** (AI_ATTIC):
+```
+RuntimeError: required rank 4 tensor to use channels_last format
+```
+- All 18 test files in leak_report.csv failed with this error
+- **Cause**: Tensor shape mismatch - expecting `(batch, height, width, channels)`
+- **Common fix**: Ensure input tensors are properly reshaped before CNN forward pass
+
+### 📋 Configuration Issues
+
+1. **Hardcoded Paths Everywhere**
+   - Most scripts use `/DEVELOPMENT/` paths
+   - Not configurable via environment or CLI
+   - Breaks portability
+
+2. **Multiple Label Sets**
+   - Three different label definitions across the codebase
+   - Can cause training/inference mismatch
+
+3. **Batch Size Proliferation**
+   - Five different batch sizes across scripts (16, 64, 256, 512, 2048, 16384)
+   - No clear documentation on when to use which
+
+---
+
 ## Critical Actions Required
 
 ### Immediate (Security)
 1. **Create `.gitignore`** to prevent credential leaks
-2. **Rotate FCS DataGate credentials** if code has been shared
+2. **Rotate ALL FCS DataGate credentials** (both sets!) if code has been shared
 3. **Move credentials to environment variables**
+4. **Remove commented credentials from old_config.py** (still in git history!)
+
+### Immediate (Code Fixes)
+5. **Fix cnn_mel_processor.py imports** - currently broken
+6. **Standardize Mel spectrogram parameters** across all scripts
+7. **Fix or remove old_config.py** sample rate (44100 vs 4096)
 
 ### Short-term (Documentation)
-4. **Clarify active label set** - update all configs to match
-5. **Document version differences** (base vs v15)
-6. **Document pipeline.py evolution** (271 → 417 lines)
+8. **Clarify active label set** - update all configs to match
+9. **Document actual vs documented segmentation** (overlapping windows, not multi-size)
+10. **Document version differences** (base vs v15)
+11. **Document pipeline.py evolution** (271 → 417 lines)
+12. **Add configuration source-of-truth** guide
 
 ### Medium-term (Quality)
-7. **Add unit tests** (currently only integration/diagnostic tests)
-8. **Centralize logging configuration**
-9. **Create proper package structure** (add `__init__.py` files)
-10. **Add example data/sample files** for testing
+13. **Centralize configuration** - single source of truth
+14. **Add unit tests** (currently only integration/diagnostic tests)
+15. **Centralize logging configuration**
+16. **Create proper package structure** (add `__init__.py` files)
+17. **Add example data/sample files** for testing
+18. **Make paths configurable** (remove hardcoded /DEVELOPMENT/ paths)
 
 ---
 
 *This CLAUDE.md file is maintained for AI assistants working on the AILH_MASTER codebase. Keep it updated as the project evolves.*
 
-**Last Updated**: 2024-11-18
+**Last Updated**: 2024-11-18 (Deep Scan v3)
 **Maintained By**: AI Assistant (Claude)
 **Repository**: AILH_MASTER
 **Total Files**: 51 Python files (~20,000 lines)
-**Documentation Version**: 2.0 (Comprehensive)
+**Documentation Version**: 3.0 (Deep Analysis - Critical Issues Identified)
