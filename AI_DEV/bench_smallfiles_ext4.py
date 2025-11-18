@@ -12,11 +12,32 @@ Focus: disk READ path only (no writes).
 """
 
 from __future__ import annotations
-import argparse, fnmatch, os, sys, stat, time, itertools, threading, mmap, errno, csv, random, subprocess, json
+import argparse
+import csv
+import errno
+import fnmatch
+import itertools
+import json
+import logging
+import mmap
+import os
+import random
+import stat
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import quantiles
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # ---------- small helpers ----------
 def _split_env_list(name: str, default: list[str]) -> list[str]:
@@ -78,19 +99,25 @@ class Config:
     LIMIT       = _env_int("SFA_LIMIT", 0)                    # 0 = no limit
     SHUFFLE     = _env_bool("SFA_SHUFFLE", True)
     TRIALS      = 1
+    
     # ---- Search spaces (coarse) ----
-    THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24])
-    BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [32768, 65536, 131072])
-    METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread", "readinto", "mmap"])
-    FADVISE_COARSE        = _split_env_list    ("SFA_FADVISE",        ["SEQUENTIAL", "WILLNEED", "NONE"])   
-    #MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [1, 2, 4, 8, 10, 12, 14, 16, 32, 64, 128, 256, 512, 1024])
-    MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [32, 64, 128])
-    #FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [1, 2, 4, 8, 10, 12, 14, 16, 32, 64, 128, 256, 512, 1024, 4096, 8192, 32768, 131072])
-    FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [1, 2, 4])
+    THREADS_COARSE        = _split_env_int_list("SFA_THREADS",        [5])
+    BUFSIZES_COARSE       = _split_env_int_list("SFA_BUFSIZES",       [131072])
+    METHODS_COARSE        = _split_env_list    ("SFA_METHODS",        ["osread"])
+    FADVISE_COARSE        = _split_env_list    ("SFA_FADVISE",        ["NONE"])
+    MAX_INFLIGHT_COARSE   = _split_env_int_list("SFA_MAX_INFLIGHT",   [0])
+    FILES_PER_TASK_COARSE = _split_env_int_list("SFA_FILES_PER_TASK", [192, 384, 512, 768])
+    
+    # ---- Search spaces (fine) - for neighbor search ----
+    THREADS_FINE          = _split_env_int_list("SFA_THREADS_FINE",   [3, 4, 5, 6, 7, 8])
+    BUFSIZES_FINE         = _split_env_int_list("SFA_BUFSIZES_FINE",  [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288])
+    MAX_INFLIGHT_FINE     = _split_env_int_list("SFA_MAX_INFLIGHT_FINE", [0, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024])
+    FILES_PER_TASK_FINE   = _split_env_int_list("SFA_FILES_PER_TASK_FINE", [128, 192, 256, 384, 512, 768, 1024])
+
 
     # ---- Rounds ----
-    ROUNDS      = _env_int("SFA_ROUNDS", 1)       # warm-cache repeats per combo
-    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", False)  # optional cold-ish rounds (per-file DONTNEED)
+    ROUNDS      = _env_int("SFA_ROUNDS", 2)       # warm-cache repeats per combo
+    COLD_ROUNDS = _env_int("SFA_COLD_ROUNDS", 0)  # optional cold-ish rounds (per-file DONTNEED)
     TRUE_COLD   = _env_bool("SFA_TRUE_COLD", False)
 
     # ---- Latency recording ----
@@ -101,7 +128,8 @@ class Config:
     BEST_JSON    = os.environ.get("SFA_BEST_JSON", "best_smallfiles.json")
     BEST_SNIPPET = os.environ.get("SFA_BEST_SNIPPET", "best_smallfiles_snippet.py")
 
-# ---------- fadvise constants (Linux) ----------
+# ---------- Constants ----------
+# fadvise constants (Linux)
 POSIX_FADV_NORMAL     = 0
 POSIX_FADV_RANDOM     = 1
 POSIX_FADV_SEQUENTIAL = 2
@@ -110,24 +138,69 @@ POSIX_FADV_DONTNEED   = 4
 POSIX_FADV_NOREUSE    = 5
 HAVE_POSIX_FADVISE = hasattr(os, "posix_fadvise")
 
+# Performance tuning defaults
+DEFAULT_NEIGHBOR_WIDTH = 1
+DEFAULT_FILE_LIMIT_MULTIPLIER = 2
+WARM_ROUND_PREFIX = "warm"
+COLD_ROUND_PREFIX = "cold"
+
+# File system constants
+CACHE_DROP_PATH = "/proc/sys/vm/drop_caches"
+CACHE_DROP_VALUE = b"3"
+MOUNTINFO_PATH = "/proc/self/mountinfo"
+SYSFS_BLOCK_PATH = "/sys/block"
+
 # ---------- File discovery ----------
-def list_files(root: Path, pattern: str, min_bytes: int, max_bytes: int, shuffle: bool) -> list[Path]:
+def list_files(root: Path, pattern: str, min_bytes: int, max_bytes: int, 
+               shuffle: bool, limit: int = 0) -> List[Path]:
+    """
+    Recursively find files matching pattern and size constraints.
+    
+    Args:
+        root: Root directory to search
+        pattern: Filename pattern (e.g., "*.wav")
+        min_bytes: Minimum file size in bytes
+        max_bytes: Maximum file size in bytes
+        shuffle: Whether to shuffle the results
+        limit: Maximum number of files to return (0 = no limit)
+    
+    Returns:
+        List of Path objects matching criteria
+    """
+    if not root.exists():
+        logger.error(f"Root directory does not exist: {root}")
+        return []
+    
     out = []
-    for p, _, files in os.walk(root):
-        for name in files:
-            if pattern and not fnmatch.fnmatch(name, pattern):
-                continue
-            fp = Path(p) / name
-            try:
-                st = fp.stat()
-                if not stat.S_ISREG(st.st_mode):
+    try:
+        for p, _, files in os.walk(root):
+            for name in files:
+                if pattern and not fnmatch.fnmatch(name, pattern):
                     continue
-                if min_bytes <= st.st_size <= max_bytes:
-                    out.append(fp)
-            except FileNotFoundError:
-                pass
+                fp = Path(p) / name
+                try:
+                    st = fp.stat()
+                    if not stat.S_ISREG(st.st_mode):
+                        continue
+                    if min_bytes <= st.st_size <= max_bytes:
+                        out.append(fp)
+                        # Early exit if limit reached (before shuffle)
+                        if limit > 0 and len(out) >= limit * 2:
+                            break
+                except (FileNotFoundError, PermissionError) as e:
+                    logger.debug(f"Skipping file {fp}: {e}")
+            if limit > 0 and len(out) >= limit * 2:
+                break
+    except Exception as e:
+        logger.error(f"Error during file discovery: {e}")
+        
     if shuffle:
         random.shuffle(out)
+    
+    if limit > 0 and len(out) > limit:
+        out = out[:limit]
+        
+    logger.info(f"Found {len(out)} files matching criteria")
     return out
 
 # ---------- Mount & device inspection ----------
@@ -291,7 +364,16 @@ def detect_device_info(root: Path) -> Dict[str, Any]:
     return info
 
 # ---------- O_NOATIME test ----------
-def can_use_onoatime(sample_file: Path) -> tuple[bool, str]:
+def can_use_onoatime(sample_file: Path) -> Tuple[bool, str]:
+    """
+    Test if O_NOATIME flag can be used on a file.
+    
+    Args:
+        sample_file: Path to a test file
+        
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
     flags = os.O_RDONLY | getattr(os, "O_NOATIME", 0)
     try:
         fd = os.open(sample_file, flags)
@@ -309,26 +391,54 @@ def can_use_onoatime(sample_file: Path) -> tuple[bool, str]:
 
 # ---------- Drop caches (root-only; use carefully) ----------
 def drop_caches_if_root() -> bool:
+    """
+    Drop filesystem caches (requires root privileges).
+    Uses /proc/sys/vm/drop_caches with value 3 to clear all caches.
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
     if os.geteuid() != 0:
+        logger.debug("Not running as root; skipping cache drop")
         return False
     try:
         os.sync()
-        with open("/proc/sys/vm/drop_caches", "w") as f:
-            f.write("3\n")
+        with open(CACHE_DROP_PATH, "w") as f:
+            f.write(CACHE_DROP_VALUE.decode())
+        logger.info("Successfully dropped caches")
         return True
-    except Exception:
+    except PermissionError:
+        logger.warning("Failed to write to drop_caches: permission denied")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to drop caches: {e}")
         return False
 
 # ---------- Read methods ----------
-def read_with_os_read(path: Path, bufsize: int, use_noatime: bool, fadvise: str|None, record_latencies: bool):
-    # Linux-friendly, zero-temp-alloc per chunk via os.readv into a preallocated buffer
+def read_with_os_read(path: Path, bufsize: int, use_noatime: bool, 
+                      fadvise: Optional[str], record_latencies: bool):
+    """
+    Read file using os.readv() with optional fadvise hints.
+    Memory efficient with pre-allocated buffers.
+    
+    Args:
+        path: File path to read
+        bufsize: Buffer size in bytes
+        use_noatime: Whether to use O_NOATIME flag
+        fadvise: Fadvise hint (SEQUENTIAL, RANDOM, WILLNEED)
+        record_latencies: Whether to record per-chunk latencies
+        
+    Returns:
+        Dict with metrics: bytes_read, latencies, elapsed_time
+    """
     flags = os.O_RDONLY
     if use_noatime:
         flags |= getattr(os, "O_NOATIME", 0)
+    
     fd = os.open(path, flags)
     try:
         if HAVE_POSIX_FADVISE and fadvise:
-            hint = {"SEQUENTIAL":2, "RANDOM":1, "WILLNEED":3}.get(fadvise, 0)
+            hint = {"SEQUENTIAL": 2, "RANDOM": 1, "WILLNEED": 3}.get(fadvise, 0)
             if hint:
                 os.posix_fadvise(fd, 0, 0, hint)
 
@@ -336,11 +446,17 @@ def read_with_os_read(path: Path, bufsize: int, use_noatime: bool, fadvise: str|
         buf = bytearray(bufsize)
         mv = memoryview(buf)
         t0 = time.perf_counter()
+        latencies = []
+        t_chunk = 0  # Initialize to prevent unbound error
 
         # read loop: fill mv using readv
         while True:
+            if record_latencies:
+                t_chunk = time.perf_counter()
             # os.readv returns number of bytes read into the buffers (0 = EOF)
             n = os.readv(fd, [mv])
+            if record_latencies and n > 0:
+                latencies.append(time.perf_counter() - t_chunk)
             if n == 0:
                 break
             total += n
@@ -355,7 +471,21 @@ def read_with_os_read(path: Path, bufsize: int, use_noatime: bool, fadvise: str|
         os.close(fd)
 
 
-def read_with_readinto(path: Path, bufsize: int, use_noatime: bool, fadvise: str|None, record_latencies: bool):
+def read_with_readinto(path: Path, bufsize: int, use_noatime: bool, 
+                       fadvise: Optional[str], record_latencies: bool):
+    """
+    Read file using file.readinto() method.
+    
+    Args:
+        path: File path to read
+        bufsize: Buffer size in bytes
+        use_noatime: Whether to use O_NOATIME flag
+        fadvise: Fadvise hint (SEQUENTIAL, RANDOM, WILLNEED)
+        record_latencies: Whether to record per-chunk latencies
+        
+    Returns:
+        Dict with metrics: bytes_read, latencies, elapsed_time
+    """
     flags = os.O_RDONLY
     if use_noatime:
         flags |= getattr(os, "O_NOATIME", 0)
@@ -391,7 +521,21 @@ def read_with_readinto(path: Path, bufsize: int, use_noatime: bool, fadvise: str
         f.close()
 
 
-def read_with_mmap(path: Path, _bufsize: int, use_noatime: bool, fadvise: str|None, record_latencies: bool):
+def read_with_mmap(path: Path, _bufsize: int, use_noatime: bool, 
+                   fadvise: Optional[str], record_latencies: bool):
+    """
+    Read file using memory-mapped I/O (mmap).
+    
+    Args:
+        path: File path to read
+        _bufsize: Ignored for mmap (kept for interface compatibility)
+        use_noatime: Whether to use O_NOATIME flag
+        fadvise: Fadvise hint (SEQUENTIAL, RANDOM, WILLNEED)
+        record_latencies: Whether to record per-chunk latencies
+        
+    Returns:
+        Dict with metrics: bytes_read, latencies, elapsed_time
+    """
     flags = os.O_RDONLY
     if use_noatime:
         flags |= getattr(os, "O_NOATIME", 0)
@@ -419,7 +563,21 @@ def read_with_mmap(path: Path, _bufsize: int, use_noatime: bool, fadvise: str|No
     finally:
         os.close(fd)
 
-def read_with_sendfile(path: Path, _bufsize: int, use_noatime: bool, fadvise: str|None, record_latencies: bool):
+def read_with_sendfile(path: Path, _bufsize: int, use_noatime: bool, 
+                       fadvise: Optional[str], record_latencies: bool):
+    """
+    Read file using sendfile() syscall (Linux-specific).
+    
+    Args:
+        path: File path to read
+        _bufsize: Ignored for sendfile (kept for interface compatibility)
+        use_noatime: Whether to use O_NOATIME flag
+        fadvise: Fadvise hint (SEQUENTIAL, RANDOM, WILLNEED)
+        record_latencies: Whether to record per-chunk latencies
+        
+    Returns:
+        Dict with metrics: bytes_read, latencies, elapsed_time
+    """
     flags = os.O_RDONLY
     if use_noatime:
         flags |= getattr(os, "O_NOATIME", 0)
@@ -454,10 +612,26 @@ READ_METHODS = {
 }
 
 # ---------- Runner with inflight cap & per-task batching ----------
-def run_once(files: list[Path], threads: int, bufsize: int, method: str,
-             fadvise: str|None, use_noatime: bool, record_latencies: bool,
-             max_inflight: int|None, files_per_task: int) -> tuple[int, list[float]|None]:
+def run_once(files: List[Path], threads: int, bufsize: int, method: str,
+             fadvise: Optional[str], use_noatime: bool, record_latencies: bool,
+             max_inflight: Optional[int], files_per_task: int) -> Tuple[int, Optional[List[float]]]:
+    """
+    Execute a single benchmark trial with specified parameters.
     
+    Args:
+        files: List of files to read
+        threads: Number of worker threads
+        bufsize: I/O buffer size
+        method: Read method (osread, readinto, mmap, sendfile)
+        fadvise: Fadvise hint or None
+        use_noatime: Whether to use O_NOATIME flag
+        record_latencies: Whether to record per-file latencies
+        max_inflight: Max concurrent operations or None for unlimited
+        files_per_task: Files to batch per task
+        
+    Returns:
+        Tuple of (total_bytes_read, latencies_list or None)
+    """
     try:
         import resource
         soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -466,38 +640,56 @@ def run_once(files: list[Path], threads: int, bufsize: int, method: str,
         if max_inflight is not None and max_inflight > 0:
             max_allowed = max(1, (soft - headroom) // per_task_fds)
             if max_inflight > max_allowed:
-                print(f"[FDGUARD] Clamping max_inflight {max_inflight} -> {max_allowed} (soft limit {soft})")
+                logger.warning(f"Clamping max_inflight {max_inflight} -> {max_allowed} (soft limit {soft})")
                 max_inflight = max_allowed
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to check file descriptor limits: {e}")
 
     fn = READ_METHODS[method]
     total_bytes = 0
-    latencies: list[float] = []
+    latencies: List[float] = []
     batches = [files[i:i+files_per_task] for i in range(0, len(files), files_per_task)]
     inflight_sem = threading.Semaphore(max_inflight if (max_inflight and max_inflight > 0) else len(batches))
 
-    def task(batch: list[Path]):
+    def task(batch: List[Path]):
         nonlocal total_bytes
         with inflight_sem:
             batch_lat = []
             for path in batch:
-                n, lat = fn(path, bufsize, use_noatime, fadvise, record_latencies)
-                total_bytes += n
-                if record_latencies and lat is not None:
-                    batch_lat.append(lat)
+                try:
+                    n, lat = fn(path, bufsize, use_noatime, fadvise, record_latencies)
+                    total_bytes += n
+                    if record_latencies and lat is not None:
+                        batch_lat.append(lat)
+                except Exception as e:
+                    logger.error(f"Failed to read {path}: {e}")
             return batch_lat
 
     with ThreadPoolExecutor(max_workers=threads, thread_name_prefix=f"io{threads}") as ex:
         futs = [ex.submit(task, b) for b in batches]
         for fu in as_completed(futs):
-            bl = fu.result()
-            if record_latencies and bl:
-                latencies.extend(bl)
+            try:
+                bl = fu.result()
+                if record_latencies and bl:
+                    latencies.extend(bl)
+            except Exception as e:
+                logger.error(f"Task failed: {e}")
 
     return total_bytes, latencies if record_latencies else None
 
-def summarize(total_bytes: int, elapsed: float, nfiles: int, latencies: list[float]|None):
+def summarize(total_bytes: int, elapsed: float, nfiles: int, latencies: Optional[List[float]]):
+    """
+    Summarize benchmark metrics.
+    
+    Args:
+        total_bytes: Total bytes read
+        elapsed: Elapsed time in seconds
+        nfiles: Number of files processed
+        latencies: List of per-file latencies or None
+        
+    Returns:
+        Dict with computed metrics
+    """
     mbps = (total_bytes / 1_000_000) / elapsed if elapsed > 0 else float('inf')
     fps  = nfiles / elapsed if elapsed > 0 else float('inf')
     avg_lat = (sum(latencies)/len(latencies)) if latencies else (elapsed/nfiles if nfiles else 0.0)
@@ -517,7 +709,15 @@ def _trial_csv_header():
         "max_inflight","files_per_task"
     ]
 
-def _emit_csv_row(writer, stats, meta):
+def _emit_csv_row(writer: csv.DictWriter, stats: Dict[str, Any], meta: Dict[str, Any]):
+    """
+    Write a CSV row with benchmark results.
+    
+    Args:
+        writer: CSV DictWriter instance
+        stats: Computed statistics dictionary
+        meta: Metadata about the trial
+    """
     row = {
         "threads": meta["threads"],
         "bufsize": meta["bufsize"],
@@ -538,16 +738,22 @@ def _emit_csv_row(writer, stats, meta):
     }
     writer.writerow(row)
 
-def autotune_best_config(root: str|Path|None=None, pattern: str|None=None,
-                         min_bytes: int|None=None, max_bytes: int|None=None,
-                         limit: int|None=None, shuffle: bool|None=None) -> dict:
+def autotune_best_config(root: Optional[str | Path] = None, pattern: Optional[str] = None,
+                         min_bytes: Optional[int] = None, max_bytes: Optional[int] = None,
+                         limit: Optional[int] = None, shuffle: Optional[bool] = None) -> Dict[str, Any]:
     """
-    Returns dict of best settings found for warm-cache throughput (files/sec primary, avg latency tie-break).
+    Auto-tune and find best configuration for disk read performance.
+    
+    Returns dict of best settings found for warm-cache throughput (files/sec primary, 
+    avg latency tie-break).
 
     Parameter precedence:
       Function args (if not None) >
       Env vars (already read into Config) >
       Config defaults
+      
+    Returns:
+        Dict with best configuration and performance metrics
     """
     cfg = Config
 
@@ -562,9 +768,7 @@ def autotune_best_config(root: str|Path|None=None, pattern: str|None=None,
     if not str(root):
         raise RuntimeError("Root path not provided. Set SFA_ROOT or pass root=... to autotune_best_config().")
 
-    files = list_files(root, pattern, min_b, max_b, shuffle=shuffle)
-    if limit and len(files) > limit:
-        files = files[:limit]
+    files = list_files(root, pattern, min_b, max_b, shuffle=shuffle, limit=limit)
     if not files:
         raise RuntimeError("No files matched criteria.")
 
@@ -600,18 +804,16 @@ def autotune_best_config(root: str|Path|None=None, pattern: str|None=None,
         and select winners by averaged warm metrics.
 
         Returns:
-        best_mean_stats, best_meta, ranked  (ranked is a list of entries sorted best→worst)
-        where each ranked item is:
-        {
-            "meta": {... combo knobs ...},
-            "means": {"files_per_s": float, "avg_ms": float, "mbps": float,
-                    "files_per_s_sd": float|None, "avg_ms_sd": float|None, "mbps_sd": float|None,
-                    "count": int},
-            "sel_key": (files_per_s_mean, -avg_ms_mean, mbps_mean)
-        }
+            Tuple of (best_mean_stats, best_meta, ranked) where:
+            - best_mean_stats: Averaged performance metrics for best config
+            - best_meta: Metadata dict for best config
+            - ranked: List of entries sorted best→worst, each containing:
+              - "meta": Combo knobs (threads, bufsize, method, etc.)
+              - "means": Computed statistics with SD values
+              - "sel_key": Selection key tuple for sorting
         """
 
-        # ---- collect per-combo stats across rounds (warm only for selection) ----
+        # Collect per-combo stats across rounds (warm only for selection)
         # key = (thr, buf, meth, fav, infl, fpt)
         agg = {}
 
@@ -747,13 +949,11 @@ def autotune_best_config(root: str|Path|None=None, pattern: str|None=None,
         lo = max(0, i-width); hi = min(len(uniq)-1, i+width)
         return uniq[lo:hi+1]
 
-#    THREADS_ALL   = sorted(set([1,2,3,4,6,8,12,16,24,32]))
-    THREADS_ALL   = sorted(set([4]))
-#    BUFSIZES_ALL  = sorted(set([4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288]))
-    BUFSIZES_ALL  = sorted(set([131072]))
-    INFLIGHT_ALL  = sorted(set([0, 16, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024]))
-#    FPT_ALL       = sorted(set([1, 2, 3, 4, 6, 8, 12, 16, 32, 64, 128, 256, 512, 1024]))
-    FPT_ALL       = sorted(set([256]))
+    # Use configuration values for fine search
+    THREADS_ALL   = sorted(set(cfg.THREADS_FINE))
+    BUFSIZES_ALL  = sorted(set(cfg.BUFSIZES_FINE))
+    INFLIGHT_ALL  = sorted(set(cfg.MAX_INFLIGHT_FINE))
+    FPT_ALL       = sorted(set(cfg.FILES_PER_TASK_FINE))
 
     thr_c  = neigh_list(best["threads"],           THREADS_ALL)
     buf_c  = neigh_list(best["bufsize"],           BUFSIZES_ALL)

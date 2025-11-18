@@ -68,11 +68,11 @@ class Config:
 
         # ---------- RAM prefetch settings ----------
         self.RAM_PREFETCH_DEPTH: int = 12
-        self.RAM_AUDIO_Q_SIZE: int = 4
+        self.RAM_AUDIO_Q_SIZE: int = 12
 
         # ---------- Disk prefetch settings ----------
-        self.PREFETCH_THREADS: int = 1
-        self.PREFETCH_DEPTH: int = 1
+        self.PREFETCH_THREADS: int = 12
+        self.PREFETCH_DEPTH: int = 4
         self.FILES_PER_TASK: int = 4096
 
         # ---------- Audio / segmentation parameters ----------
