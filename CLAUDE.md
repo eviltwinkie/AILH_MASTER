@@ -220,10 +220,14 @@ AILH_MASTER/                   (51 Python files, ~20,000 lines)
 
 ### Documented Folder Structure (from DOCS/AILH.md)
 
-The **official documented structure** for the project is:
+The **official documented structure** for the project is shown below.
+
+**⚠️ IMPORTANT**: In the actual system, `ROOT_AILH` is located at **`/DEVELOPMENT/ROOT_AILH/`**
+
+The documentation shows relative paths from ROOT_AILH for clarity:
 
 ```
-ROOT_AILH/                             # Main project root
+ROOT_AILH/                             # Actual path: /DEVELOPMENT/ROOT_AILH/
 │
 ├── ATTIC/                             # Storage files/docs (archived)
 │
@@ -507,10 +511,12 @@ DELIMITER = '~'  # Used in all filename parsing
 
 ### Official Structure (DOCS/AILH.md)
 
-The **official documented structure** uses the ROOT_AILH/DATA_STORE hierarchy with MASTER_DATASET as the source of truth:
+The **official documented structure** uses the ROOT_AILH/DATA_STORE hierarchy with MASTER_DATASET as the source of truth.
+
+**⚠️ NOTE**: `ROOT_AILH` = `/DEVELOPMENT/ROOT_AILH/` in the actual filesystem
 
 ```
-ROOT_AILH/DATA_STORE/
+ROOT_AILH/DATA_STORE/                  # Actual: /DEVELOPMENT/ROOT_AILH/DATA_STORE/
 │
 ├── MASTER_DATASET/            # ⭐ SINGLE SOURCE OF TRUTH
 │   ├── BACKGROUND/            # (or QUIET - depending on label set)
