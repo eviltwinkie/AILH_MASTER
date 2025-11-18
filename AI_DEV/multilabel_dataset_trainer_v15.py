@@ -8,6 +8,7 @@
 #  - Step-accurate resume (StatefulSampler), AMP, TF32, channels_last
 #  - Checkpoints store best_leak_thr; model_meta.json written alongside
 #  - Optional SpecAugment; optional LEAK oversampling (kept off by default)
+# 5 LABELS
 # =============================================================================
 
 from __future__ import annotations

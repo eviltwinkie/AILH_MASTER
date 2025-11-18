@@ -31,9 +31,9 @@ import torchaudio
 
 # ===================== USER CONFIG (no CLI) =====================
 
-STAGE_DIR   = Path("/DEVELOPMENT/DATASET_REFERENCE")
+STAGE_DIR   = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/MASTER_DATASET")
 INPUT_DIR   = STAGE_DIR / "INFERENCE"      # will fall back to STAGE_DIR/TESTING if missing
-OUTPUT_CSV  = STAGE_DIR / "reports" / "classification_report.csv"
+OUTPUT_CSV  = STAGE_DIR / "PROC_REPORTS" / "classification_report.csv"
 
 # Segments per micro-batch on GPU (tune if you have more/less VRAM)
 BATCH_SEGMENTS = 16384

@@ -35,7 +35,7 @@ EPOCHS = 200
 LEARNING_RATE = 0.001
 MODEL_TYPE = 'mel'
 DELIMITER = '~'
-DATA_LABELS = ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
+DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
 BASE_DIR = ".."
 OUTPUT_DIR = "OUTPUT"
 SENSOR_DATA_DIR = os.path.join(BASE_DIR, "SENSOR_DATA")
@@ -54,6 +54,48 @@ REFERENCE_DATA/VALIDATION - contains all data to be used for validation
 UPDATE_DATA - contains all new data to be processed during learning. this will update as new real-world samples are collected and verified
 UPDATE_DATA/POSITIVE - True postitive labeled data to be used as reference
 UPDATE_DATA/NEGATIVE - False negative labeled data to be used as reference
+
+
+
+Paper Review - My Understanding
+THREE-LEVEL DATA ORGANIZATION:
+
+Level 1 - Original Signal (X)
+
+One complete 10-second audio file
+Example: X = complete recording
+Level 2 - Long Segments ([X₁, X₂, X₃, ..., Xₘ])
+
+Original signal X divided into overlapping long segments
+Example: 0.25s or 1.0s windows with 50% overlap
+Each Xᵢ is a long-term segment
+Purpose: "Each long-term segment served as a basis for determining whether the original signal indicated a leak"
+Level 3 - Short Segments ([Xᵢ₁, Xᵢ₂, Xᵢ₃, ..., Xᵢₙ])
+
+Each long segment Xᵢ is further divided into short segments
+Example: 512 sample windows with 50% overlap
+Each Xᵢⱼ is a short-term segment
+Purpose: "Each short-term segment served as a feature extraction segment"
+MEL SPECTROGRAM HIERARCHY (Lines 79-81):
+
+Each Xᵢⱼ → 1D mel vector (32 frequencies)
+
+"Mel-frequency features were generated from each Xij using a Mel filter bank, resulting in a one-dimensional matrix."
+[Xᵢ₁, Xᵢ₂, ..., Xᵢₙ] → 2D mel matrix (32 frequencies × n short segments)
+
+"[Xi1.Xi3...Xin] formed a two-dimensional matrix, with the horizontal axis representing the time scale and the vertical axis representing the frequency scale."
+[X₁, X₂, ..., Xₘ] → 3D structure (m long segments × 32 frequencies × n short segments each)
+
+"[X1.X3...Xm] formed a three-dimensional matrix, where each Xi represents partial information about the original signal X."
+CNN INPUT (Line 104):
+
+"The original signal was divided into time segments, and then transformed from a one-dimensional matrix into a two-dimensional matrix to serve as the model input."
+This means: CNN input is the 2D matrix from each long segment = [Xᵢ₁, Xᵢ₂, ..., Xᵢₙ] = shape (32 frequencies, n_short_segments)
+
+
+
+
+
 
 1.1.  Overview
     In the data processing module, activities include data cleaning, temporal segmentation, and data transformation. In the model construction section, convolution the operation was applied to the processed data, with the recognition target being the data segments. In the result output section, the recognition results of long-term segments were integrated to define the recognition category of that data.

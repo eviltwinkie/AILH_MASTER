@@ -5,12 +5,6 @@
 # - CUDA: 12.8, cuDNN: 9.x
 # - OS: Windows 11 + WSL2 Ubuntu
 # - Filesystem: ext4 optimized for small files (24,801.7 files/s)
-#
-# ⚠️ CRITICAL WARNING:
-# Many scripts DO NOT use these parameters and have hardcoded values!
-# - N_FFT: Scripts use 512 (not 256 as defined here)
-# - HOP_LENGTH: Scripts use 128 (not 32 as defined here)
-# - N_MELS: Scripts use 32-64 (varies, not always 64)
 
 import os
 
@@ -32,58 +26,9 @@ os.environ["TF_DISABLE_MKL"] = "0"  # Re-enable MKL for stability
 # cuDNN specific settings
 os.environ["TF_CUDNN_DETERMINISTIC"] = "1"  # Force deterministic cuDNN
 
-# ======================
-# GLOBAL PARAMETERS
-# ======================
-
-CPU_COUNT = os.cpu_count() or 1
-MAX_THREAD_WORKERS = max(1, min(CPU_COUNT - 2, CPU_COUNT * 3 // 4))
-
 #os.environ["OMP_NUM_THREADS"] = "4"
 #os.environ["TF_NUM_INTEROP_THREADS"] = "2"
 #os.environ["TF_NUM_INTRAOP_THREADS"] = "4"
-
-MIN_BATCH_SIZE = 16
-MAX_BATCH_SIZE = 512
-SAFE_BATCH_SIZE = MIN_BATCH_SIZE
-KERNEL_SIZE = (3, 3)
-
-# ⚠️ WARNING: These parameters are often OVERRIDDEN by individual scripts!
-HOP_LENGTH = 32        # ⚠️ Most scripts use 128, not this value!
-N_MELS = 64            # ⚠️ Scripts vary: 32-64, not always this value!
-N_FFT = 256            # ⚠️ Most scripts use 512, not this value!
-
-LONG_TERM_SEC = 8.0
-SHORT_TERM_SEC = 1.75
-STRIDE_SEC = 1.7
-DROPOUT = 0.15
-N_FILTERS = 80
-N_CONV_BLOCKS = 3
-MAX_POOLINGS = 2
-
-SAMPLE_RATE = 4096      # 4096 Hz REQUIRED TO UPSCALE TO 8192 Hz (see DOCS/AILH.md)
-SAMPLE_DURATION = 10.0  # 10 seconds
-INCREMENTAL_CONFIDENCE_THRESHOLD = 0.8  # Threshold for confidence in incremental learning
-INCREMENTAL_ROUNDS = 2
-LONG_SEGMENTS = [0.125, 0.25, 0.5, 0.75, 1.0]
-SHORT_SEGMENTS = [64, 128, 256, 512, 1024]
-
-CNN_BATCH_SIZE = 64
-CNN_DROPOUT = 0.25
-CNN_EPOCHS = 200
-CNN_FILTERS = 32
-CNN_POOL_SIZE = (2, 2)
-CNN_STRIDES = (2, 2)    
-CNN_LEARNING_RATE = 0.001
-CNN_KERNEL_SIZE = (3, 3)
-CNN_DENSE = 128
-
-DELIMITER = '~'
-
-# LABEL SET NOTE:
-# This is the ACTIVE label set for the feature branch (5 categories)
-# Ensure your MASTER_DATASET matches this label set before training!
-DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
 
 # ======================
 # PATH CONFIGURATION
@@ -131,3 +76,46 @@ os.makedirs(XDG_CACHE, exist_ok=True)
 NUMPY_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "NUMPY")
 os.environ["NUMPY_CACHE"] = NUMPY_CACHE
 os.makedirs(NUMPY_CACHE, exist_ok=True)
+
+
+
+# ======================
+# GLOBAL PARAMETERS
+# ======================
+
+SAMPLE_RATE = 4096
+SAMPLE_UPSCALE = 8192
+SAMPLE_LENGTH_SEC = 10
+
+CPU_COUNT = os.cpu_count() or 1
+
+DRIVE_BUFFERSIZE = 131072
+PREFETCH_THREADS = 6
+PREFETCH_DEPTH = 16
+FILES_PER_TASK = 768
+
+DELIMITER = '~'
+DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
+
+LONG_SEGMENT_SCALE_SEC = 0.25
+SHORT_SEGMENT_POINTS = 512
+
+N_FFT = SHORT_SEGMENT_POINTS # typically set equal to short segment length           
+N_MELS = 32            
+HOP_LENGTH = 128        
+
+CNN_BATCH_SIZE = 64
+CNN_DROPOUT = 0.25
+CNN_EPOCHS = 200
+CNN_FILTERS = 32
+CNN_POOL_SIZE = (2, 2)
+CNN_STRIDES = (2, 2)    
+CNN_LEARNING_RATE = 0.001
+CNN_KERNEL_SIZE = (3, 3)
+CNN_DENSE = 128
+
+INCREMENTAL_CONFIDENCE_THRESHOLD = 0.8  # Threshold for confidence in incremental learning
+INCREMENTAL_ROUNDS = 2
+
+
+

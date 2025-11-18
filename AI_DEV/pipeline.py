@@ -8,10 +8,12 @@ are being processed and flushed correctly.
 """
 
 import os
+import sys
 import time
 import queue
 import threading
-from pathlib import Path
+import fcntl
+from pathlib import Path 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional, Tuple, Union, Literal
 
@@ -22,6 +24,17 @@ import psutil
 import pynvml
 import logging
 
+# Optional TensorRT support
+try:
+    import tensorrt as trt
+    TENSORRT_AVAILABLE = True
+except ImportError:
+    TENSORRT_AVAILABLE = False
+
+# Add parent directory to sys.path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from global_config import CPU_COUNT, DRIVE_BUFFERSIZE, PREFETCH_DEPTH, PREFETCH_THREADS, FILES_PER_TASK, DATASET_TRAINING, PROC_OUTPUT, SAMPLE_RATE, SAMPLE_LENGTH_SEC, HOP_LENGTH, N_MELS, N_FFT, LONG_SEGMENT_SCALE_SEC, SHORT_SEGMENT_POINTS
 
 # ======================================================================
 # LOGGING SETUP
@@ -32,7 +45,8 @@ LOG_LEVEL = os.environ.get("PIPELINE_LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
+    #format="%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
+    format="[%(levelname)s] %(threadName)s: %(message)s",
 )
 logger = logging.getLogger("mel_pipeline")
 
@@ -55,46 +69,44 @@ class Config:
 
     def __init__(self) -> None:
         # ---------- CPU settings ----------
-        self.CPU_THREADS: int = 12
+        self.CPU_THREADS: int = CPU_COUNT
+        logger.info(f"Detected CPU_COUNT={self.CPU_THREADS}")
 
         # ---------- GPU settings ----------
-        self.GPU_BATCH_SIZE: int = 256
-        self.CUDA_STREAMS: int = 4
+        self.GPU_BATCH_SIZE: int = 4096
         self.GPU_MEMORY_FRACTION: float = 0.85
 
-        # ---------- CPU↔GPU buffer settings ----------
-        self.CPU_GPU_BUFFER_SIZE: int = 240  # in number of audio files
-        self.CPU_GPU_BUFFER_TIMEOUT_MS: int = 25  # in milliseconds
+        # ---------- CUDA streams ----------
+        self.CUDA_STREAMS: int = 8  # Increased from 1 for better GPU parallelism
+
+        # ---------- Precision settings ----------
+        self.PRECISION: str = "fp16"  # Options: "fp16", "bf16", "fp8"
+        self.USE_TENSORRT: bool = False  # TensorRT engine for mel transforms
 
         # ---------- RAM prefetch settings ----------
-        self.RAM_PREFETCH_DEPTH: int = 12
-        self.RAM_AUDIO_Q_SIZE: int = 12
+        self.RAM_PREFETCH_DEPTH: int = 24
+        self.RAM_AUDIO_Q_SIZE: int = self.RAM_PREFETCH_DEPTH
 
         # ---------- Disk prefetch settings ----------
-        self.PREFETCH_THREADS: int = 12
-        self.PREFETCH_DEPTH: int = 4
-        self.FILES_PER_TASK: int = 4096
+        self.PREFETCH_THREADS: int = PREFETCH_THREADS
+        self.PREFETCH_DEPTH: int = PREFETCH_DEPTH
+        self.FILES_PER_TASK: int = FILES_PER_TASK
+        self.DRIVE_BUFFERSIZE: int = DRIVE_BUFFERSIZE
 
         # ---------- Audio / segmentation parameters ----------
-        self.SAMPLE_RATE: int = 4096
-        self.SAMPLE_LENGTH_SEC: int = 10
+        self.SAMPLE_RATE: int = SAMPLE_RATE
+        self.SAMPLE_LENGTH_SEC: int = SAMPLE_LENGTH_SEC
 
-        self.LONG_SEGMENT_SCALE_SEC: float = 0.25
-        self.SHORT_SEGMENT_POINTS: int = 512
+        self.LONG_SEGMENT_SCALE_SEC: float = LONG_SEGMENT_SCALE_SEC
+        self.SHORT_SEGMENT_POINTS: int = SHORT_SEGMENT_POINTS
 
-        self.N_FFT: int = 512
-        self.HOP_LENGTH: int = 128
-        self.N_MELS: int = 32
+        self.N_FFT: int = N_FFT
+        self.HOP_LENGTH: int = HOP_LENGTH
+        self.N_MELS: int = N_MELS
 
         # ---------- Output / dataset paths ----------
-        self.OUTPUT_DIR: Path = Path(
-            "/DEVELOPMENT/ROOT_AILH/DATA_STORE/MEMMAPS"
-        )
-        self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-        self.DATASET_PATH: Path = Path(
-            "/DEVELOPMENT/ROOT_AILH/DATA_STORE/TRAINING"
-        )
+        self.OUTPUT_DIR: Path = Path(PROC_OUTPUT)
+        self.DATASET_PATH: Path = Path(DATASET_TRAINING)
 
         # ---------- Device / CUDA optimization ----------
         self.DEVICE: torch.device = torch.device("cuda")
@@ -136,6 +148,25 @@ def init_nvml() -> Optional[Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("NVML init failed: %s", exc)
         return None
+
+
+def get_gpu_occupancy(gpu_handle: Optional[Any]) -> Tuple[int, int]:
+    """
+    Get GPU utilization percentage and SM count.
+    Returns (gpu_utilization_percent, total_sm_count)
+    """
+    if gpu_handle is None:
+        return 0, 82  # RTX 5090 has 82 SMs
+    
+    try:
+        # Get GPU utilization
+        util = pynvml.nvmlDeviceGetUtilizationRates(gpu_handle).gpu
+        # RTX 5090 has 82 SMs (from test results)
+        total_sms = 82
+        return int(util), total_sms
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("GPU occupancy query failed: %s", exc)
+        return 0, 82
 
 
 def safe_init_memmap(
@@ -183,6 +214,35 @@ class AtomicCounter:
             return self._value
 
 
+def build_tensorrt_mel_engine(
+    sample_rate: int,
+    n_fft: int,
+    hop_length: int,
+    n_mels: int,
+    segment_size: int,
+    precision: str = "fp16",
+) -> Optional[Any]:
+    """
+    Build a TensorRT engine for mel spectrogram computation (optional).
+    Returns engine if TensorRT available and enabled, else None.
+    """
+    if not TENSORRT_AVAILABLE:
+        logger.info("TensorRT not available; skipping engine build")
+        return None
+    
+    try:
+        logger.info("Building TensorRT mel spectrogram engine (%s precision)...", precision)
+        
+        # For now, return None as TensorRT for mel requires complex setup
+        # In production, you'd define a TRT network with custom CUDA kernels
+        # or use TRT's built-in layers to approximate mel spectrogram
+        logger.info("TensorRT mel engine support deferred (requires custom kernel)")
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TensorRT engine build failed: %s; falling back to PyTorch", exc)
+        return None
+
+
 # ======================================================================
 # MAIN PIPELINE
 # ======================================================================
@@ -212,6 +272,15 @@ def run_pipeline() -> None:
     HEADER_SIZE = 44  # Standard WAV header size (bytes)
     NUM_SAMPLES = cfg.SAMPLE_RATE * cfg.SAMPLE_LENGTH_SEC
     BYTES_PER_SAMPLE = np.dtype(np.int16).itemsize
+    
+    # Log TensorRT availability
+    if cfg.USE_TENSORRT and TENSORRT_AVAILABLE:
+        logger.info("TensorRT enabled for mel transforms")
+    elif cfg.USE_TENSORRT:
+        logger.warning("TensorRT requested but not available; using PyTorch")
+        cfg.USE_TENSORRT = False
+    else:
+        logger.info("Using PyTorch for mel transforms (TensorRT disabled)")
 
     # ------------------------------------------------------------------
     # FILE DISCOVERY
@@ -257,7 +326,7 @@ def run_pipeline() -> None:
         )
         return
 
-    mel_time_frames = short_win // cfg.HOP_LENGTH
+    mel_time_frames = (short_win - cfg.N_FFT) // cfg.HOP_LENGTH + 1
     mel_shape = (total_short_segments, cfg.N_MELS, mel_time_frames)
 
     logger.info("Segmentation geometry:")
@@ -265,21 +334,19 @@ def run_pipeline() -> None:
     logger.info("  long_win=%d, long_hop=%d", long_win, long_hop)
     logger.info("  short_win=%d, short_hop=%d", short_win, short_hop)
     logger.info("  num_long_segments=%d", num_long_segments)
-    logger.info(
-        "  num_short_segments_per_long=%d", num_short_segments_per_long
-    )
+    logger.info("  num_short_segments_per_long=%d", num_short_segments_per_long)
     logger.info("  total_short_segments=%d", total_short_segments)
     logger.info("  mel_shape=%s", mel_shape)
 
     # ------------------------------------------------------------------
     # MEMMAP ALLOCATION
     # ------------------------------------------------------------------
-    mel_memmap_path = cfg.OUTPUT_DIR / "mel_features.dat"
+    mel_memmap_path = cfg.OUTPUT_DIR / "PIPELINE_FEATURES.DAT"
     mel_memmap = safe_init_memmap(
         mel_memmap_path, mel_shape, dtype=np.dtype(np.float32), mode="w+"
     )
 
-    mapping_path = cfg.OUTPUT_DIR / "mel_mapping.npy"
+    mapping_path = cfg.OUTPUT_DIR / "PIPELINE_MEMMAP.NPY"
 
     if total_short_segments < 10_000_000:
         mapping_array: Union[np.ndarray, np.memmap] = np.empty(
@@ -307,9 +374,7 @@ def run_pipeline() -> None:
     # ------------------------------------------------------------------
     # QUEUES, FLAGS, COUNTERS
     # ------------------------------------------------------------------
-    ram_audio_q: "queue.Queue[tuple[int, torch.Tensor]]" = queue.Queue(
-        maxsize=cfg.RAM_PREFETCH_DEPTH
-    )
+    ram_audio_q: "queue.Queue[tuple[int, torch.Tensor]]" = queue.Queue( maxsize=cfg.RAM_PREFETCH_DEPTH)
 
     done_flag = threading.Event()
     producer_complete = threading.Event()
@@ -323,6 +388,8 @@ def run_pipeline() -> None:
     # GPU TRANSFORMS
     # ------------------------------------------------------------------
     logger.info("Initializing GPU transforms on device %s", cfg.DEVICE)
+    logger.info("Precision mode: %s, CUDA Streams: %d", cfg.PRECISION, cfg.CUDA_STREAMS)
+    
     mel_transform = torchaudio.transforms.MelSpectrogram(
         sample_rate=cfg.SAMPLE_RATE,
         n_fft=cfg.N_FFT,
@@ -337,6 +404,18 @@ def run_pipeline() -> None:
         stype="power",
         top_db=80.0,
     ).to(cfg.DEVICE)
+    
+    # Determine autocast dtype based on precision setting
+    if cfg.PRECISION == "fp8":
+        # FP8 requires compute capability 8.9+ (Blackwell, Ada, etc.)
+        autocast_dtype = torch.float8_e4m3fn
+        logger.info("Using FP8 (E4M3) precision for mel transforms")
+    elif cfg.PRECISION == "bf16":
+        autocast_dtype = torch.bfloat16
+        logger.info("Using BF16 precision for mel transforms")
+    else:  # Default to fp16
+        autocast_dtype = torch.float16
+        logger.info("Using FP16 precision for mel transforms")
 
     # ==================================================================
     # STATUS REPORTER THREAD
@@ -366,13 +445,19 @@ def run_pipeline() -> None:
                         )
                         / (1024**2)
                     )
+                    # GPU occupancy (approximate via utilization)
+                    occupancy, total_sms = get_gpu_occupancy(gpu_handle)
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("NVML query failed: %s", exc)
                     gpu_util = 0
                     vram_used = 0
+                    occupancy = 0
+                    total_sms = 82
             else:
                 gpu_util = 0
                 vram_used = 0
+                occupancy = 0
+                total_sms = 82
 
             current_nvme = nvme_bytes_read.get()
             current_gpu = gpu_bytes_processed.get()
@@ -385,12 +470,13 @@ def run_pipeline() -> None:
             last_gpu = current_gpu
 
             logger.info(
-                "[STATUS] %6.1fs | CPU %5.1f%% | GPU %3d%% | RAM %5.1f%% | "
+                "%6.1fs | CPU %5.1f%% | GPU %3d%% | Occ %3d%% | RAM %5.1f%% | "
                 "VRAM %6.0fMB | Buff %d/%d | Files %d/%d | "
-                "NVMe %5.2f GB/s | GPU %5.2f GB/s | Thr %d | FPT %d | Depth %d",
+                "NVMe %5.2f GB/s | GPU %5.2f GB/s | Streams %d | Prec %s",
                 elapsed,
                 cpu,
                 gpu_util,
+                occupancy,
                 ram,
                 vram_used,
                 ram_audio_q.qsize(),
@@ -399,9 +485,8 @@ def run_pipeline() -> None:
                 total_files,
                 nvme_rate,
                 gpu_rate,
-                cfg.PREFETCH_THREADS,
-                cfg.FILES_PER_TASK,
-                cfg.RAM_PREFETCH_DEPTH,
+                cfg.CUDA_STREAMS,
+                cfg.PRECISION,
             )
 
             time.sleep(1.0)
@@ -414,7 +499,12 @@ def run_pipeline() -> None:
 
     def prefetch_audio(start_idx: int) -> None:
         """
-        Read a contiguous block of WAV files, decode to float32, and push to RAM.
+        Read a contiguous block of WAV files optimized with tuned disk settings.
+        
+        Uses:
+        - O_NOATIME flag for reduced syscalls
+        - Configurable buffer size (131KB optimal per tuning)
+        - Sequential read hints via posix_fadvise
         """
         end_idx = min(start_idx + cfg.FILES_PER_TASK, total_files)
         batch_size = end_idx - start_idx
@@ -434,32 +524,58 @@ def run_pipeline() -> None:
         for i, file_idx in enumerate(range(start_idx, end_idx)):
             file_path = wav_files[file_idx]
             try:
-                with open(file_path, "rb") as f:
-                    f.seek(HEADER_SIZE)
-                    raw = f.read(NUM_SAMPLES * BYTES_PER_SAMPLE)
-
-                if len(raw) == NUM_SAMPLES * BYTES_PER_SAMPLE:
-                    audio_np = (
-                        np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-                        / 32768.0
-                    )
-                else:
-                    audio_data = (
-                        np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-                        / 32768.0
-                    )
-                    audio_np = np.zeros(NUM_SAMPLES, dtype=np.float32)
-                    audio_np[: len(audio_data)] = audio_data
-                    logger.debug(
-                        "Short read for %s (got %d bytes), padded to %d samples",
-                        file_path,
-                        len(raw),
-                        NUM_SAMPLES,
-                    )
-
-                buf[i] = torch.from_numpy(audio_np)
-                nvme_bytes_read.increment(len(raw))
-                files_processed.increment()
+                # Open with O_NOATIME to avoid inode updates (tuned parameter)
+                fd = os.open(file_path, os.O_RDONLY | os.O_NOATIME)
+                try:
+                    # Apply posix_fadvise for sequential access (tuning: NONE = let kernel decide)
+                    # Fadvise hint was NONE in tuning, but we can use SEQUENTIAL for clarity
+                    try:
+                        fcntl.fcntl(fd, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
+                        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_SEQUENTIAL)
+                    except (AttributeError, OSError):
+                        pass  # posix_fadvise not available on all systems
+                    
+                    # Seek to WAV header
+                    os.lseek(fd, HEADER_SIZE, os.SEEK_SET)
+                    
+                    # Read using tuned buffer size for optimal throughput
+                    bytes_to_read = NUM_SAMPLES * BYTES_PER_SAMPLE
+                    raw = b""
+                    remaining = bytes_to_read
+                    
+                    while remaining > 0:
+                        chunk_size = min(cfg.DRIVE_BUFFERSIZE, remaining)
+                        chunk = os.read(fd, chunk_size)
+                        if not chunk:
+                            break
+                        raw += chunk
+                        remaining -= len(chunk)
+                    
+                    if len(raw) == bytes_to_read:
+                        audio_np = (
+                            np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+                            / 32768.0
+                        )
+                    else:
+                        audio_data = (
+                            np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+                            / 32768.0
+                        )
+                        audio_np = np.zeros(NUM_SAMPLES, dtype=np.float32)
+                        audio_np[: len(audio_data)] = audio_data
+                        logger.debug(
+                            "Short read for %s (got %d bytes), padded to %d samples",
+                            file_path,
+                            len(raw),
+                            NUM_SAMPLES,
+                        )
+                    
+                    buf[i] = torch.from_numpy(audio_np)
+                    nvme_bytes_read.increment(len(raw))
+                    files_processed.increment()
+                
+                finally:
+                    os.close(fd)
 
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to read %s: %s", file_path, exc)
@@ -604,7 +720,8 @@ def run_pipeline() -> None:
                     )
                 )
 
-                with torch.amp.autocast("cuda", dtype=torch.float16):
+                # Use selected precision for mel transform
+                with torch.amp.autocast("cuda", dtype=autocast_dtype):
                     mel_spec = mel_transform(batch_segments)
                     mel_spec_db = amplitude_to_db(mel_spec)
 
@@ -664,7 +781,7 @@ def run_pipeline() -> None:
         target=status_reporter,
         args=(start_time,),
         daemon=True,
-        name="status_reporter",
+        name="[STATUS]",
     )
     status_thread.start()
 

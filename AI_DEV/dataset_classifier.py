@@ -31,8 +31,8 @@ filepath,is_leak,leak_conf_mean,per_long_probs_json,long_pos_frac,notes
 Usage Example
 -------------
 python dataset_classifier_new.py \
-  --stage-dir /DEVELOPMENT/DATASET_REFERENCE \
-  --in-dir   /DEVELOPMENT/DATASET_REFERENCE/INFERENCE/LEAK \
+  --stage-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/MASTER_DATASET \
+  --in-dir   /DEVELOPMENT/ROOT_AILH/DATA_STORE/MASTER_DATASET/INFERENCE/LEAK \
   --prob softmax \
   --decision frac_vote --long-frac 0.25 --thr 0.35 \
   --out leak_report.csv
