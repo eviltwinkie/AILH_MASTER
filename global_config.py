@@ -11,37 +11,14 @@
 # - N_FFT: Scripts use 512 (not 256 as defined here)
 # - HOP_LENGTH: Scripts use 128 (not 32 as defined here)
 # - N_MELS: Scripts use 32-64 (varies, not always 64)
-# See CLAUDE.md "Configuration Discrepancies" section for full details.
 
 import os
 
-CACHE_DIR = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE"
-os.environ["CACHE_DIR"] = CACHE_DIR
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-TEMP_DIR = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_TEMP"
-os.environ["TEMP"] = TEMP_DIR
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-KERAS_HOME = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE/KERAS"
-os.environ["KERAS_HOME"] = KERAS_HOME
-os.makedirs(KERAS_HOME, exist_ok=True)
-
-TORCH_HOME = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE/TORCH"
-os.environ["TORCH_HOME"] = TORCH_HOME
-os.makedirs(TORCH_HOME, exist_ok=True)
-
-XDG_CACHE_HOME = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE/XDG"
-os.environ["XDG_CACHE_HOME"] = XDG_CACHE_HOME
-os.makedirs(XDG_CACHE_HOME, exist_ok=True)
-
-os.environ["NUMPY_TEMP"] = TEMP_DIR
-
-print("[AUDIT] Current Working Dir:", os.getcwd())
+DEBUG = False
 
 os.environ["KERAS_BACKEND"] = "tensorflow"
 os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use only first GPU to avoid conflicts
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0" 
@@ -60,12 +37,11 @@ os.environ["TF_CUDNN_DETERMINISTIC"] = "1"  # Force deterministic cuDNN
 # ======================
 
 CPU_COUNT = os.cpu_count() or 1
-#MAX_THREAD_WORKERS = max(1, min(CPU_COUNT - 2, CPU_COUNT * 3 // 4))
-MAX_THREAD_WORKERS = 8
+MAX_THREAD_WORKERS = max(1, min(CPU_COUNT - 2, CPU_COUNT * 3 // 4))
 
-os.environ["OMP_NUM_THREADS"] = "4" #4
-os.environ["TF_NUM_INTEROP_THREADS"] = "2"
-os.environ["TF_NUM_INTRAOP_THREADS"] = "4" #4
+#os.environ["OMP_NUM_THREADS"] = "4"
+#os.environ["TF_NUM_INTEROP_THREADS"] = "2"
+#os.environ["TF_NUM_INTRAOP_THREADS"] = "4"
 
 MIN_BATCH_SIZE = 16
 MAX_BATCH_SIZE = 512
@@ -104,21 +80,18 @@ CNN_DENSE = 128
 
 DELIMITER = '~'
 
-# ⚠️ LABEL SET NOTE:
+# LABEL SET NOTE:
 # This is the ACTIVE label set for the feature branch (5 categories)
 # Ensure your MASTER_DATASET matches this label set before training!
-# See CLAUDE.md "Classification Categories" for full details.
 DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
 
 # ======================
 # PATH CONFIGURATION
 # ======================
 
-# Official ROOT_AILH structure (from DOCS/AILH.md)
-# ROOT_AILH is located at /DEVELOPMENT/ROOT_AILH/ in the actual filesystem
-ROOT_AILH = "/DEVELOPMENT/ROOT_AILH"
-DATA_STORE = os.path.join(ROOT_AILH, "DATA_STORE")
-DATA_SENSORS = os.path.join(ROOT_AILH, "DATA_SENSORS")
+ROOT_DIR = "/DEVELOPMENT/ROOT_AILH"
+DATA_STORE = os.path.join(ROOT_DIR, "DATA_STORE")
+DATA_SENSORS = os.path.join(ROOT_DIR, "DATA_SENSORS")
 
 # Dataset directories (derived from MASTER_DATASET)
 MASTER_DATASET = os.path.join(DATA_STORE, "MASTER_DATASET")      # ⭐ Source of truth
@@ -135,37 +108,26 @@ PROC_MODELS = os.path.join(DATA_STORE, "PROC_MODELS")    # Models
 PROC_OUTPUT = os.path.join(DATA_STORE, "PROC_OUTPUT")    # Output files
 PROC_REPORTS = os.path.join(DATA_STORE, "PROC_REPORTS")  # Classification reports
 
-# Legacy paths (for backward compatibility with older scripts)
-BASE_DIR = ".."
-OUTPUT_DIR = "OUTPUT"
+CACHE_DIR = os.path.join(DATA_STORE, "PROC_CACHE")
+os.environ["CACHE_DIR"] = CACHE_DIR
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-DEBUG = False
+TEMP_DIR = os.path.join(DATA_STORE, "PROC_TEMP")
+os.environ["TEMP"] = TEMP_DIR
+os.makedirs(TEMP_DIR, exist_ok=True)
 
+KERAS_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "KERAS")
+os.environ["KERAS_CACHE"] = KERAS_CACHE
+os.makedirs(KERAS_CACHE, exist_ok=True)
 
-def set_base_dir(base_path):
-    """Set the base directory for all data paths."""
-    global BASE_DIR, SENSOR_DATA_DIR, RAW_SIGNALS_DIR, LABELED_SEGMENTS_DIR
-    global REFERENCE_DIR, REFERENCE_TRAINING_DIR, REFERENCE_VALIDATION_DIR
-    global UPDATE_DIR, UPDATE_POSITIVE_DIR, UPDATE_NEGATIVE_DIR
-    
-    BASE_DIR = base_path
-    SENSOR_DATA_DIR = os.path.join(BASE_DIR, "SENSOR_DATA")
-    RAW_SIGNALS_DIR = os.path.join(SENSOR_DATA_DIR, "RAW_SIGNALS")
-    LABELED_SEGMENTS_DIR = os.path.join(SENSOR_DATA_DIR, "LABELED_SEGMENTS")
-    REFERENCE_DIR = os.path.join(BASE_DIR, "REFERENCE_DATA")
-    REFERENCE_TRAINING_DIR = os.path.join(REFERENCE_DIR, "TRAINING")
-    REFERENCE_VALIDATION_DIR = os.path.join(REFERENCE_DIR, "VALIDATION")
-    UPDATE_DIR = os.path.join(BASE_DIR, "UPDATE_DATA")
-    UPDATE_POSITIVE_DIR = os.path.join(UPDATE_DIR, "POSITIVE")
-    UPDATE_NEGATIVE_DIR = os.path.join(UPDATE_DIR, "NEGATIVE")
+TORCH_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "TORCH")
+os.environ["TORCH_CACHE"] = TORCH_CACHE
+os.makedirs(TORCH_CACHE, exist_ok=True)
 
-# Initialize with default paths
-set_base_dir(BASE_DIR)
+XDG_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "XDG")
+os.environ["XDG_CACHE"] = XDG_CACHE
+os.makedirs(XDG_CACHE, exist_ok=True)
 
-# try:
-#     import pyfftw
-#     pyfftw.interfaces.cache.enable()
-#     print("[✓] pyFFTW cache enabled for FFT acceleration")
-# except ImportError:
-#     print("[i] pyFFTW not installed; FFTW acceleration skipped.")
-
+NUMPY_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "NUMPY")
+os.environ["NUMPY_CACHE"] = NUMPY_CACHE
+os.makedirs(NUMPY_CACHE, exist_ok=True)
