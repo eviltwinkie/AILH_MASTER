@@ -1,34 +1,41 @@
+# Global Configuration for AILH_MASTER - Acoustic Leak Detection System
+#
+# HARDWARE ENVIRONMENT (see CLAUDE.md for full specs):
+# - GPU: NVIDIA GeForce RTX 5090 Laptop (24GB VRAM, Compute Capability 12.0)
+# - CUDA: 12.8, cuDNN: 9.x
+# - OS: Windows 11 + WSL2 Ubuntu
+# - Filesystem: ext4 optimized for small files (24,801.7 files/s)
+#
+# ⚠️ CRITICAL WARNING:
+# Many scripts DO NOT use these parameters and have hardcoded values!
+# - N_FFT: Scripts use 512 (not 256 as defined here)
+# - HOP_LENGTH: Scripts use 128 (not 32 as defined here)
+# - N_MELS: Scripts use 32-64 (varies, not always 64)
+# See CLAUDE.md "Configuration Discrepancies" section for full details.
+
 import os
 
-CACHE_DIR = "/mnt/d/AILH_CACHE"
+CACHE_DIR = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE"
 os.environ["CACHE_DIR"] = CACHE_DIR
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-TMPDIR = "/mnt/d/AILH_TMP"
-os.environ["TMPDIR"] = TMPDIR
-os.makedirs(TMPDIR, exist_ok=True)
+TEMP_DIR = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_TEMP"
+os.environ["TEMP"] = TEMP_DIR
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-TEMP = "/mnt/d/AILH_TMP"
-os.environ["TEMP"] = TEMP
-os.makedirs(TEMP, exist_ok=True)
-
-TMP = "/mnt/d/AILH_TMP"
-os.environ["TMP"] = TMP
-os.makedirs(TMP, exist_ok=True)
-
-KERAS_HOME = "/mnt/d/AILH_CACHE/KERAS"
+KERAS_HOME = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE/KERAS"
 os.environ["KERAS_HOME"] = KERAS_HOME
 os.makedirs(KERAS_HOME, exist_ok=True)
 
-TORCH_HOME = "/mnt/d/AILH_CACHE/TORCH"
+TORCH_HOME = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE/TORCH"
 os.environ["TORCH_HOME"] = TORCH_HOME
 os.makedirs(TORCH_HOME, exist_ok=True)
 
-XDG_CACHE_HOME = "/mnt/d/AILH_CACHE/XDG"
+XDG_CACHE_HOME = "/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_CACHE/XDG"
 os.environ["XDG_CACHE_HOME"] = XDG_CACHE_HOME
 os.makedirs(XDG_CACHE_HOME, exist_ok=True)
 
-os.environ["NUMPY_TEMP"] = TEMP
+os.environ["NUMPY_TEMP"] = TEMP_DIR
 
 print("[AUDIT] Current Working Dir:", os.getcwd())
 
@@ -64,19 +71,22 @@ MIN_BATCH_SIZE = 16
 MAX_BATCH_SIZE = 512
 SAFE_BATCH_SIZE = MIN_BATCH_SIZE
 KERNEL_SIZE = (3, 3)
-HOP_LENGTH = 32
+
+# ⚠️ WARNING: These parameters are often OVERRIDDEN by individual scripts!
+HOP_LENGTH = 32        # ⚠️ Most scripts use 128, not this value!
+N_MELS = 64            # ⚠️ Scripts vary: 32-64, not always this value!
+N_FFT = 256            # ⚠️ Most scripts use 512, not this value!
+
 LONG_TERM_SEC = 8.0
 SHORT_TERM_SEC = 1.75
 STRIDE_SEC = 1.7
 DROPOUT = 0.15
 N_FILTERS = 80
-N_MELS = 64
-N_FFT = 256
 N_CONV_BLOCKS = 3
 MAX_POOLINGS = 2
 
-SAMPLE_RATE = 4096      # 4096 Hz
-SAMPLE_DURATION = 10.0         # 10 seconds
+SAMPLE_RATE = 4096      # 4096 Hz REQUIRED TO UPSCALE TO 8192 Hz (see DOCS/AILH.md)
+SAMPLE_DURATION = 10.0  # 10 seconds
 INCREMENTAL_CONFIDENCE_THRESHOLD = 0.8  # Threshold for confidence in incremental learning
 INCREMENTAL_ROUNDS = 2
 LONG_SEGMENTS = [0.125, 0.25, 0.5, 0.75, 1.0]
@@ -93,8 +103,40 @@ CNN_KERNEL_SIZE = (3, 3)
 CNN_DENSE = 128
 
 DELIMITER = '~'
+
+# ⚠️ LABEL SET NOTE:
+# This is the ACTIVE label set for the feature branch (5 categories)
+# Main branch uses 6 categories: ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
+# Ensure your MASTER_DATASET matches this label set before training!
+# See CLAUDE.md "Classification Categories" for full details.
 DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
 
+# ======================
+# PATH CONFIGURATION
+# ======================
+
+# Official ROOT_AILH structure (from DOCS/AILH.md)
+# ROOT_AILH is located at /DEVELOPMENT/ROOT_AILH/ in the actual filesystem
+ROOT_AILH = "/DEVELOPMENT/ROOT_AILH"
+DATA_STORE = os.path.join(ROOT_AILH, "DATA_STORE")
+DATA_SENSORS = os.path.join(ROOT_AILH, "DATA_SENSORS")
+
+# Dataset directories (derived from MASTER_DATASET)
+MASTER_DATASET = os.path.join(DATA_STORE, "MASTER_DATASET")      # ⭐ Source of truth
+DATASET_TRAINING = os.path.join(DATA_STORE, "DATASET_TRAINING")  # 70% of MASTER_DATASET
+DATASET_VALIDATION = os.path.join(DATA_STORE, "DATASET_VALIDATION")  # 20% of MASTER_DATASET
+DATASET_TESTING = os.path.join(DATA_STORE, "DATASET_TESTING")    # 10% of MASTER_DATASET
+DATASET_LEARNING = os.path.join(DATA_STORE, "DATASET_LEARNING")  # Incremental learning data
+DATASET_DEV = os.path.join(DATA_STORE, "DATASET_DEV")            # Development/testing only
+
+# Processing directories
+PROC_CACHE = os.path.join(DATA_STORE, "PROC_CACHE")      # Memmaps, temp files
+PROC_LOGS = os.path.join(DATA_STORE, "PROC_LOGS")        # Logs
+PROC_MODELS = os.path.join(DATA_STORE, "PROC_MODELS")    # Models
+PROC_OUTPUT = os.path.join(DATA_STORE, "PROC_OUTPUT")    # Output files
+PROC_REPORTS = os.path.join(DATA_STORE, "PROC_REPORTS")  # Classification reports
+
+# Legacy paths (for backward compatibility with older scripts)
 BASE_DIR = ".."
 OUTPUT_DIR = "OUTPUT"
 
