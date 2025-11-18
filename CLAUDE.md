@@ -42,24 +42,97 @@
 
 **⚠️ IMPORTANT: Multiple Label Sets Exist**
 
-The repository contains **THREE different label sets** - verify which is active before modifying:
+The repository contains **FOUR different label sets** - verify which is active before modifying:
 
-1. **AI_DEV/global_config.py (ACTIVE - Current)**:
-   ```python
-   DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
-   ```
-
-2. **AI_ATTIC/README.md (DOCUMENTATION)**:
+1. **DOCS/AILH.md (OFFICIAL DOCUMENTATION - Main Branch)**:
    ```python
    DATA_LABELS = ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
    ```
+   - This is the **authoritative specification** from the main branch documentation
+   - Includes 6 categories covering all acoustic signal types
+   - Recommended for new deployments
 
-3. **UTILITIES/old_config.py (LEGACY)**:
+2. **AI_DEV/global_config.py (ACTIVE - Feature Branch)**:
+   ```python
+   DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
+   ```
+   - Currently active in the feature branch
+   - Simplified to 5 categories
+   - Different naming: 'BACKGROUND' instead of 'QUIET', adds 'CRACK', removes 'RANDOM'/'MECHANICAL'
+
+3. **AI_ATTIC/README.md (ARCHIVE DOCUMENTATION)**:
+   ```python
+   DATA_LABELS = ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
+   ```
+   - Matches the official DOCS/AILH.md specification
+   - Archived documentation (same as official)
+
+4. **UTILITIES/old_config.py (LEGACY)**:
    ```python
    LABELS = ['LEAK', 'NORMAL', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
    ```
+   - Legacy configuration (5 categories, missing 'QUIET')
+   - **DO NOT USE** - contains outdated configurations
 
-**Recommendation**: Before training or modifying classifiers, verify which label set matches your dataset.
+**⚠️ LABEL SET MISMATCH WARNING**:
+- **Official documentation** (main branch): 6 categories with QUIET/RANDOM/MECHANICAL
+- **Current implementation** (feature branch): 5 categories with BACKGROUND/CRACK
+- This discrepancy can cause:
+  - Training/inference mismatches
+  - Model architecture incompatibilities (wrong output layer size)
+  - Dataset organization issues
+
+**Recommendation**:
+1. **Before training**: Verify which label set matches your MASTER_DATASET
+2. **For new projects**: Use the official DOCS/AILH.md labels
+3. **For existing models**: Maintain consistency with the label set used during initial training
+4. **When merging branches**: Reconcile label set differences carefully
+
+---
+
+## Hardware Environment
+
+### Production System Specifications
+
+**⚠️ IMPORTANT**: This project runs on **Windows 11 with WSL2 Ubuntu** environment.
+
+**GPU Configuration**:
+- **Model**: NVIDIA GeForce RTX 5090 Laptop GPU
+- **VRAM**: 24GB GDDR7
+- **Compute Capability**: 12.0 (Ada Lovelace architecture)
+- **CUDA Version**: 12.8
+- **cuDNN Version**: 9.x
+- **Driver Version**: Latest NVIDIA drivers
+
+**CPU Configuration**:
+- Multiple cores available (optimal: 4-12 threads)
+- OMP_NUM_THREADS=4 (configured)
+
+**Storage Optimization**:
+- **Filesystem**: ext4 (optimized for small files)
+- **Performance**: 24,801.7 files/s (measured with bench_smallfiles_ext4.py)
+- **Optimal Settings**: 6 threads, 131KB buffer, osread method
+- **Dataset Path**: /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_DEV
+
+**Memory**:
+- 8GB+ RAM recommended
+- GPU memory management with TF_GPU_ALLOCATOR=cuda_malloc_async
+
+### Sample Rate Upscaling Requirement
+
+**⚠️ CRITICAL**: The system is designed for **4096 Hz sampling REQUIRED TO UPSCALE TO 8192 Hz**.
+
+This is a fundamental design requirement documented in DOCS/AILH.md:
+```python
+SAMPLE_RATE = 4096      # 4096 Hz REQUIRED TO UPSCALE TO 8192
+```
+
+The 2x upscaling is likely used for:
+- Enhanced frequency resolution
+- Better Mel spectrogram quality
+- Improved CNN feature extraction
+
+**AI Assistant Note**: When processing audio, ensure the upscaling step is preserved in the pipeline.
 
 ---
 
@@ -135,13 +208,96 @@ AILH_MASTER/                   (51 Python files, ~20,000 lines)
 - **AI_ATTIC**: Archive/backup - reference only, DO NOT modify
   - **Note**: `pipeline.py` in AI_ATTIC is **146 lines shorter** - use AI_DEV version
 - **FCS_UTILS**: External data fetching - standalone module
+  - **⚠️ NAMING DISCREPANCY**: Feature branch uses `FCS_UTILS/`, but main branch may use `FCS_TOOLS/`
+  - Verify the correct naming when merging branches
 - **UTILITIES**: Shared tools - used by both AI_DEV and FCS_UTILS
 
 ---
 
 ## Development Environment Paths
 
-**IMPORTANT**: Multiple scripts use hardcoded `/DEVELOPMENT/` paths not configurable via `global_config.py`:
+**IMPORTANT**: Multiple scripts use hardcoded `/DEVELOPMENT/` paths not configurable via `global_config.py`.
+
+### Documented Folder Structure (from DOCS/AILH.md)
+
+The **official documented structure** for the project is:
+
+```
+ROOT_AILH/                             # Main project root
+│
+├── ATTIC/                             # Storage files/docs (archived)
+│
+├── DATA_SENSORS/                      # Incoming sensor data (multiple folders)
+│   ├── DATA_FOLDER/                   # Site/Logger specific folders
+│   ⋮
+│   └── DATA_FOLDER/
+│
+├── DATA_STORE/                        # Datasets, logs, output, etc.
+│   │
+│   ├── DATASET_DEV/                   # Temp development use for code testing
+│   │   ├── BACKGROUND/
+│   │   ├── CRACK/
+│   │   ├── LEAK/
+│   │   ├── NORMAL/
+│   │   └── UNCLASSIFIED/
+│   │
+│   ├── DATASET_LEARNING/              # Incremental learning data
+│   │   ├── BACKGROUND/
+│   │   ├── CRACK/
+│   │   ├── LEAK/
+│   │   ├── NORMAL/
+│   │   └── UNCLASSIFIED/
+│   │
+│   ├── DATASET_TESTING/               # Test dataset
+│   │   ├── BACKGROUND/
+│   │   ├── CRACK/
+│   │   ├── LEAK/
+│   │   ├── NORMAL/
+│   │   └── UNCLASSIFIED/
+│   │
+│   ├── DATASET_TRAINING/              # Training dataset
+│   │   ├── BACKGROUND/
+│   │   ├── CRACK/
+│   │   ├── LEAK/
+│   │   ├── NORMAL/
+│   │   └── UNCLASSIFIED/
+│   │
+│   ├── DATASET_VALIDATION/            # Validation dataset
+│   │   ├── BACKGROUND/
+│   │   ├── CRACK/
+│   │   ├── LEAK/
+│   │   ├── NORMAL/
+│   │   └── UNCLASSIFIED/
+│   │
+│   ├── MASTER_DATASET/                # ⭐ SOURCE OF ALL DATA
+│   │   ├── BACKGROUND/                # (Master copy - do not modify directly)
+│   │   ├── CRACK/
+│   │   ├── LEAK/
+│   │   ├── NORMAL/
+│   │   └── UNCLASSIFIED/
+│   │
+│   ├── PROC_CACHE/                    # Memmaps, temp files, etc.
+│   ├── PROC_LOGS/                     # Logs
+│   ├── PROC_MODELS/                   # Models
+│   ├── PROC_OUTPUT/                   # Output
+│   └── PROC_REPORTS/                  # Reports
+│
+└── REPOS/                             # Source code repositories
+    └── AILH_MASTER/                   # Current working code
+
+```
+
+**⚠️ CRITICAL: MASTER_DATASET Concept**
+
+The `MASTER_DATASET` is the **single source of truth** for all training data:
+- All labeled and verified audio samples are stored here
+- Other dataset folders (TRAINING, VALIDATION, TESTING, etc.) are **derived** from MASTER_DATASET
+- **Never modify MASTER_DATASET directly** during training - only add verified samples
+- Use data splitting scripts to populate other dataset folders from MASTER_DATASET
+
+### Actual Implementation Paths (Current Scripts)
+
+The **current scripts** use this structure under `/DEVELOPMENT/`:
 
 ```
 /DEVELOPMENT/
@@ -152,7 +308,9 @@ AILH_MASTER/                   (51 Python files, ~20,000 lines)
 │   ├── DATA_SENSORS/           # FCS DataGate downloads
 │   └── DATA_STORE/             # Training data and memmaps
 │       ├── MEMMAPS/            # Memory-mapped arrays (pipeline.py)
-│       └── TRAINING/           # Training datasets (pipeline.py)
+│       ├── TRAINING/           # Training datasets (pipeline.py)
+│       └── DATASET_DEV/        # Development dataset (test_disk_settings.py)
+│
 └── DATASET_REFERENCE/          # Dataset and model storage
     ├── INFERENCE/              # Inference inputs
     ├── TESTING/                # Test datasets
@@ -166,12 +324,18 @@ AILH_MASTER/                   (51 Python files, ~20,000 lines)
     └── TESTING_DATASET.H5
 ```
 
+**⚠️ PATH DISCREPANCY WARNING**:
+- **Documented structure** (DOCS/AILH.md): Uses `ROOT_AILH/` as base with comprehensive `DATA_STORE/` subdirectories
+- **Current implementation**: Uses `/DEVELOPMENT/ROOT_AILH/` and `/DEVELOPMENT/DATASET_REFERENCE/`
+- **Recommendation**: Migrate to the documented structure for consistency
+
 **Scripts using hardcoded paths**:
 - `pipeline.py` → `/DEVELOPMENT/ROOT_AILH/DATA_STORE/`
 - `datagate_sync.py` → `/DEVELOPMENT/ROOT_AILH/AILH_LOGS`, `/DEVELOPMENT/ROOT_AILH/DATA_SENSORS`
 - `old_config.py` → `/DEVELOPMENT/ROOT_AILH/` (all subdirectories)
 - `dataset_classifier.py` → `/DEVELOPMENT/DATASET_REFERENCE` (default)
 - `leak_directory_classifier.py` → `/DEVELOPMENT/DATASET_REFERENCE` (hardcoded)
+- `test_disk_settings.py` → `/DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_DEV`
 
 ---
 
@@ -341,7 +505,48 @@ DELIMITER = '~'  # Used in all filename parsing
 
 ## Data Directory Structure
 
-The system expects a specific folder layout (relative to BASE_DIR):
+### Official Structure (DOCS/AILH.md)
+
+The **official documented structure** uses the ROOT_AILH/DATA_STORE hierarchy with MASTER_DATASET as the source of truth:
+
+```
+ROOT_AILH/DATA_STORE/
+│
+├── MASTER_DATASET/            # ⭐ SINGLE SOURCE OF TRUTH
+│   ├── BACKGROUND/            # (or QUIET - depending on label set)
+│   ├── CRACK/                 # (if using feature branch labels)
+│   ├── LEAK/
+│   ├── NORMAL/
+│   ├── RANDOM/                # (if using official labels)
+│   ├── MECHANICAL/            # (if using official labels)
+│   └── UNCLASSIFIED/
+│
+├── DATASET_TRAINING/          # Derived from MASTER_DATASET (70%)
+│   └── [same label subdirectories]
+│
+├── DATASET_VALIDATION/        # Derived from MASTER_DATASET (20%)
+│   └── [same label subdirectories]
+│
+├── DATASET_TESTING/           # Derived from MASTER_DATASET (10%)
+│   └── [same label subdirectories]
+│
+├── DATASET_LEARNING/          # Incremental learning data
+│   └── [same label subdirectories]
+│
+└── DATASET_DEV/               # Development/testing (not for production training)
+    └── [same label subdirectories]
+```
+
+**⚠️ CRITICAL WORKFLOW**:
+1. All verified audio samples go into **MASTER_DATASET** first
+2. Use data splitting scripts to populate TRAINING/VALIDATION/TESTING from MASTER_DATASET
+3. **Never train directly on MASTER_DATASET** - it's the archive
+4. DATASET_LEARNING receives incremental learning data from production models
+5. DATASET_DEV is for code testing only
+
+### Legacy Structure (AI_ATTIC/README.md)
+
+The older documentation describes this alternative structure:
 
 ```
 BASE_DIR/
@@ -351,41 +556,23 @@ BASE_DIR/
 │
 ├── REFERENCE_DATA/            # Initial training/validation data
 │   ├── TRAINING/              # Training dataset (70%)
-│   │   ├── LEAK/
-│   │   ├── NORMAL/
-│   │   ├── QUIET/
-│   │   ├── RANDOM/
-│   │   ├── MECHANICAL/
-│   │   └── UNCLASSIFIED/
+│   │   └── [label subdirectories]
 │   └── VALIDATION/            # Validation dataset (20%)
-│       ├── LEAK/
-│       ├── NORMAL/
-│       ├── QUIET/
-│       ├── RANDOM/
-│       ├── MECHANICAL/
-│       └── UNCLASSIFIED/
+│       └── [label subdirectories]
 │
 └── UPDATE_DATA/               # Incremental learning data
     ├── POSITIVE/              # True positive labeled data
-    │   ├── LEAK/
-    │   ├── NORMAL/
-    │   ├── QUIET/
-    │   ├── RANDOM/
-    │   ├── MECHANICAL/
-    │   └── UNCLASSIFIED/
+    │   └── [label subdirectories]
     └── NEGATIVE/              # False negative labeled data
-        ├── LEAK/
-        ├── NORMAL/
-        ├── QUIET/
-        ├── RANDOM/
-        ├── MECHANICAL/
-        └── UNCLASSIFIED/
+        └── [label subdirectories]
 ```
 
+**Note**: Some scripts still reference this legacy structure. When working with older scripts, verify which directory structure they expect.
+
 ### Data Split Ratios
-- **Training**: 70% (REFERENCE_DATA/TRAINING)
-- **Validation**: 20% (REFERENCE_DATA/VALIDATION)
-- **Test**: 10% (typically held-out from validation)
+- **Training**: 70% (DATASET_TRAINING or REFERENCE_DATA/TRAINING)
+- **Validation**: 20% (DATASET_VALIDATION or REFERENCE_DATA/VALIDATION)
+- **Test**: 10% (DATASET_TESTING or held-out from validation)
 
 ### Incremental Learning Data Flow
 
@@ -1520,27 +1707,88 @@ RuntimeError: required rank 4 tensor to use channels_last format
 6. **Standardize Mel spectrogram parameters** across all scripts
 7. **Fix or remove old_config.py** sample rate (44100 vs 4096)
 
+### Immediate (Branch Reconciliation) ⭐ NEW
+8. **Reconcile label sets** between main and feature branch
+   - Main: 6 categories (LEAK, NORMAL, QUIET, RANDOM, MECHANICAL, UNCLASSIFIED)
+   - Feature: 5 categories (BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED)
+   - **Impact**: Affects model architecture and dataset organization
+9. **Merge DOCS/ folder** from main branch to feature branch
+   - Critical documentation missing from feature branch
+   - Includes official requirements, hardware specs, test results
+10. **Document sample rate upscaling** requirement (4096 → 8192 Hz)
+    - Currently only mentioned in main branch DOCS/AILH.md
+    - Needs to be in code comments and configuration
+
 ### Short-term (Documentation)
-8. **Clarify active label set** - update all configs to match
-9. **Document actual vs documented segmentation** (overlapping windows, not multi-size)
-10. **Document version differences** (base vs v15)
-11. **Document pipeline.py evolution** (271 → 417 lines)
-12. **Add configuration source-of-truth** guide
+11. **Clarify active label set** - update all configs to match chosen standard
+12. **Document actual vs documented segmentation** (overlapping windows, not multi-size)
+13. **Document version differences** (base vs v15)
+14. **Document pipeline.py evolution** (271 → 417 lines)
+15. **Add configuration source-of-truth** guide
+16. **Implement MASTER_DATASET workflow** from main branch documentation
+    - Create data migration scripts
+    - Update all scripts to use MASTER_DATASET structure
+17. **Clarify FCS_UTILS vs FCS_TOOLS naming** discrepancy
 
 ### Medium-term (Quality)
-13. **Centralize configuration** - single source of truth
-14. **Add unit tests** (currently only integration/diagnostic tests)
-15. **Centralize logging configuration**
-16. **Create proper package structure** (add `__init__.py` files)
-17. **Add example data/sample files** for testing
-18. **Make paths configurable** (remove hardcoded /DEVELOPMENT/ paths)
+18. **Centralize configuration** - single source of truth
+19. **Add unit tests** (currently only integration/diagnostic tests)
+20. **Centralize logging configuration**
+21. **Create proper package structure** (add `__init__.py` files)
+22. **Add example data/sample files** for testing
+23. **Make paths configurable** (remove hardcoded /DEVELOPMENT/ paths)
+24. **Migrate folder structure** to official ROOT_AILH layout from DOCS/AILH.md
+
+---
+
+---
+
+## Branch Differences Summary
+
+### Main Branch vs Feature Branch
+
+**⚠️ IMPORTANT**: There are significant differences between the main branch and the current feature branch:
+
+| Aspect | Main Branch (DOCS/) | Feature Branch (Current) |
+|--------|---------------------|--------------------------|
+| **Documentation** | Has DOCS/ folder with AILH.md, OPTIMIZATION_GUIDE.md, test results | No DOCS/ folder |
+| **Label Set** | 6 categories: LEAK, NORMAL, QUIET, RANDOM, MECHANICAL, UNCLASSIFIED | 5 categories: BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED |
+| **Folder Structure** | ROOT_AILH with comprehensive DATA_STORE subdirs | /DEVELOPMENT/ROOT_AILH with simpler structure |
+| **Dataset Concept** | MASTER_DATASET as source of truth | No MASTER_DATASET concept documented |
+| **FCS Module Name** | May use FCS_TOOLS | Uses FCS_UTILS |
+| **Hardware Specs** | Documented (RTX 5090, CUDA 12.8) | Not in code, only in DOCS |
+| **Sample Rate Note** | "4096 Hz REQUIRED TO UPSCALE TO 8192" | Just "4096 Hz" |
+
+**Recommendation for Merging**:
+1. Reconcile label sets first (critical for model compatibility)
+2. Migrate to MASTER_DATASET structure from main branch
+3. Adopt the comprehensive DATA_STORE folder organization
+4. Preserve hardware documentation in merged branch
+5. Clarify FCS_UTILS vs FCS_TOOLS naming
+6. Document the upscaling requirement in code comments
+
+---
+
+## DOCS Folder Contents (Main Branch Only)
+
+The main branch contains a `DOCS/` folder with critical project information not present in the feature branch:
+
+- **AILH.md** (189 lines): Official requirements, folder structure, label sets
+- **OPTIMIZATION_GUIDE.md** (253 lines): Performance tuning guide
+- **LeakDetectionTwoStageSegmentation.pdf**: Academic paper/methodology reference
+- **test_gpu_cuda_results.txt**: RTX 5090 GPU specifications and test results
+- **test_disk_tune_results.txt**: Filesystem optimization results (24,801.7 files/s)
+
+**⚠️ Action Required**: When merging branches, ensure DOCS/ folder is preserved and updated in the final branch.
 
 ---
 
 *This CLAUDE.md file is maintained for AI assistants working on the AILH_MASTER codebase. Keep it updated as the project evolves.*
 
-**Last Updated**: 2024-11-18 (Deep Scan v3)
+**Last Updated**: 2024-11-18 (DOCS Integration v4.0)
 **Maintained By**: AI Assistant (Claude)
 **Repository**: AILH_MASTER
+**Branch**: claude/claude-md-mi4dhprryhqr7c6w-01LgGSbMKZSwDXhbyNs3VtR4
 **Total Files**: 51 Python files (~20,000 lines)
-**Documentation Version**: 3.0 (Deep Analysis - Critical Issues Identified)
+**Documentation Version**: 4.0 (DOCS Folder Integration - Main Branch Analysis)
+**Hardware**: Windows 11 + WSL2 Ubuntu, RTX 5090 (24GB), CUDA 12.8, 24,801.7 files/s I/O
