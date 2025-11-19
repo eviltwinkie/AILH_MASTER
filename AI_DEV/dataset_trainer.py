@@ -752,72 +752,66 @@ def prepare_mel_batch(
 
 class BinaryLabelDataset(Dataset):
     """
-    Wrapper dataset that converts multi-class labels to binary LEAK/NOLEAK.
+    Transparent wrapper that converts multi-class labels to binary LEAK/NOLEAK.
     
-    Wraps an existing LeakMelDataset and converts labels on-the-fly:
-    - Original leak class → 1 (LEAK)
+    This wrapper enables binary classification training using datasets originally
+    designed for multi-class problems. It transparently forwards all attributes
+    and methods to the underlying dataset while converting labels on-the-fly.
+    
+    Label Conversion:
+    -----------------
+    - Original LEAK class (leak_idx) → 1 (LEAK)
     - All other classes → 0 (NOLEAK)
     
+    The wrapper maintains compatibility with file-level evaluation by preserving
+    access to the original file labels in the HDF5 dataset. During evaluation,
+    these original labels are used to determine ground truth LEAK files.
+    
+    Implementation:
+    ---------------
+    Uses __getattr__ to forward all attribute access to base_dataset, making
+    this a truly transparent wrapper. This eliminates the need to manually
+    forward every HDF5 attribute (num_files, _segs, _labels, etc.).
+    
     Args:
-        base_dataset: Underlying dataset with multi-class labels
-        leak_idx: Index of LEAK class in original labels
+        base_dataset: LeakMelDataset with multi-class labels
+        leak_idx: Index of LEAK class in original labels (e.g., 2 for 5-class)
+    
+    Example:
+        >>> # 5-class dataset with LEAK at index 2
+        >>> base_ds = LeakMelDataset('train.h5')
+        >>> binary_ds = BinaryLabelDataset(base_ds, leak_idx=2)
+        >>> mel, label = binary_ds[0]  # label is 0 or 1
+        >>> binary_ds.num_files  # Forwarded from base_ds
     """
     def __init__(self, base_dataset: Dataset, leak_idx: int):
         self.base_dataset = base_dataset
         self.leak_idx = leak_idx
     
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.base_dataset)  # type: ignore
     
     def __getitem__(self, index: int):
+        """Convert segment label to binary on-the-fly."""
         mel_t, label_t = self.base_dataset[index]
+        # Efficient in-place conversion: 1 if LEAK, 0 otherwise
         binary_label = torch.tensor(1 if label_t.item() == self.leak_idx else 0, dtype=torch.long)
         return mel_t, binary_label
     
     def __getattr__(self, name):
-        """Forward any attribute access to base dataset."""
+        """
+        Transparent attribute forwarding to base dataset.
+        
+        This magic method forwards ALL attribute access to the underlying dataset,
+        including HDF5 attributes needed for file-level evaluation:
+        - num_files, num_long, num_short (dataset structure)
+        - _segs, _labels, h5f (HDF5 datasets)
+        - _ensure_open, _has_channel (methods)
+        
+        This eliminates the need for manual forwarding and makes the wrapper
+        truly transparent to downstream code.
+        """
         return getattr(self.base_dataset, name)
-    
-    # Forward attributes needed for file-level evaluation
-    @property
-    def num_files(self):
-        return self.base_dataset.num_files  # type: ignore
-    
-    @property
-    def num_long(self):
-        return self.base_dataset.num_long  # type: ignore
-    
-    @property
-    def num_short(self):
-        return self.base_dataset.num_short  # type: ignore
-    
-    @property
-    def file_labels(self):
-        return self.base_dataset.file_labels  # type: ignore
-    
-    @property
-    def _has_channel(self):
-        return self.base_dataset._has_channel  # type: ignore
-    
-    def _ensure_open(self):
-        """Forward HDF5 file open call to base dataset."""
-        if hasattr(self.base_dataset, '_ensure_open'):
-            self.base_dataset._ensure_open()  # type: ignore
-    
-    def __getstate__(self):
-        """Forward pickling to base dataset."""
-        if hasattr(self.base_dataset, '__getstate__'):
-            return {'base_dataset': self.base_dataset.__getstate__(), 'leak_idx': self.leak_idx}  # type: ignore
-        return {'base_dataset': self.base_dataset, 'leak_idx': self.leak_idx}
-    
-    def __setstate__(self, state):
-        """Forward unpickling to base dataset."""
-        self.leak_idx = state['leak_idx']
-        if hasattr(state['base_dataset'], '__setstate__'):
-            self.base_dataset = LeakMelDataset.__new__(LeakMelDataset)
-            self.base_dataset.__setstate__(state['base_dataset'])  # type: ignore
-        else:
-            self.base_dataset = state['base_dataset']
     
     def __enter__(self):
         if hasattr(self.base_dataset, '__enter__'):
@@ -1580,10 +1574,6 @@ def evaluate_file_level(
                 blk = ds._segs[fidx]  # type: ignore[index]
                 true_label = int(ds._labels[fidx])  # type: ignore[index,arg-type]
                 true_is_leak = 1 if true_label == dataset_leak_idx else 0
-                
-                # DEBUG: Print first few to verify labels
-                if fidx < 3:
-                    logger.debug(f"File {fidx}: true_label={true_label}, dataset_leak_idx={dataset_leak_idx}, true_is_leak={true_is_leak}")
                 true_leak_count += true_is_leak
                 
                 # Process each long segment (pre-allocate numpy array for efficiency)
@@ -1719,6 +1709,7 @@ def train_one_epoch(
     leak_bce: Optional[nn.Module],
     cfg: Config,
     leak_idx: int,
+    model_leak_idx: int,
     device: torch.device,
     use_ta: bool,
     time_mask: Optional[nn.Module],
@@ -1776,7 +1767,22 @@ def train_one_epoch(
             loss_cls = cls_loss_fn(logits, labels)
             
             if cfg.use_leak_aux_head:
-                leak_target = (labels == leak_idx).to(torch.float32)
+                # Auxiliary head: Binary LEAK detection across both modes
+                # 
+                # Binary mode (n_classes=2):
+                #   - labels: 0 (NOLEAK) or 1 (LEAK) from BinaryLabelDataset
+                #   - model_leak_idx: 1 (LEAK class in binary output)
+                #   - leak_target: 1.0 if label==1, else 0.0
+                #
+                # Multi-class mode (n_classes=5):
+                #   - labels: 0-4 (BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED)
+                #   - model_leak_idx: 2 (LEAK class in original labels)
+                #   - leak_target: 1.0 if label==2, else 0.0
+                #
+                # The auxiliary head learns to detect LEAK regardless of mode,
+                # providing additional gradient signal during training and
+                # averaging with the main classifier during inference.
+                leak_target = (labels == model_leak_idx).to(torch.float32)
                 loss_leak = leak_bce(leak_logit, leak_target)  # type: ignore[misc]
                 loss = loss_cls + cfg.leak_aux_weight * loss_leak
             else:
@@ -1957,10 +1963,34 @@ def validate_config(cfg: Config):
 
 def setup_datasets(cfg: Config) -> Tuple[LeakMelDataset, LeakMelDataset, List[str], List[str], int, List[int], Subset]:
     """
-    Load datasets and prepare training indices.
+    Load HDF5 datasets and configure for binary or multi-class training.
+    
+    This function handles the critical setup of dataset structure that differs
+    between binary and multi-class modes:
+    
+    Binary Mode (cfg.binary_mode=True):
+    ------------------------------------
+    - Datasets remain in original multi-class format (HDF5 unchanged)
+    - class_names set to ["NOLEAK", "LEAK"] for model output
+    - cfg.num_classes forced to 2
+    - leak_idx keeps original value (e.g., 2 for 5-class datasets)
+    - BinaryLabelDataset wrapper applied later to convert labels 0/1
+    - File-level labels stay original (needed for evaluation)
+    
+    Multi-class Mode (cfg.binary_mode=False):
+    ------------------------------------------
+    - Datasets used as-is
+    - class_names from HDF5 metadata
+    - cfg.num_classes matches dataset
+    - leak_idx identifies LEAK class in original labels
+    
+    The key insight: We don't modify the HDF5 files. The BinaryLabelDataset
+    wrapper handles label conversion at training time, while file-level
+    evaluation uses original labels for ground truth.
     
     Returns:
-        Tuple of (train_ds, val_ds, class_names, original_class_names, leak_idx, train_indices, val_subset)
+        Tuple of (train_ds, val_ds, class_names, original_class_names, 
+                  leak_idx, train_indices, val_subset)
     """
     logger.info("="*80)
     logger.info("DATASET PREPARATION")
@@ -1987,13 +2017,13 @@ def setup_datasets(cfg: Config) -> Tuple[LeakMelDataset, LeakMelDataset, List[st
             f"Leak class '{cfg.leak_class_name}' not found in dataset classes: {original_class_names}"
         )
     
-    # Handle binary vs multi-class mode
+    # Configure class names and model output dimensionality based on mode
     if cfg.binary_mode:
         logger.info("%s[BINARY MODE] Converting to LEAK/NOLEAK classification%s", CYAN, RESET)
         class_names = ["NOLEAK", "LEAK"]
-        # Update config to reflect binary classification
-        cfg.num_classes = 2
-        # Note: leak_idx in original labels stays the same, model_leak_idx=1 for binary
+        cfg.num_classes = 2  # Force binary output
+        # leak_idx stays original (e.g., 2) - needed for file-level eval
+        # model_leak_idx will be set to 1 in train() function
     else:
         logger.info("%s[MULTI-CLASS MODE] Using all %d classes%s", CYAN, len(original_class_names), RESET)
         class_names = original_class_names
@@ -2198,7 +2228,7 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
         
         train_loss, train_acc = train_one_epoch(
             epoch, model, train_loader, optimizer, scaler,
-            cls_loss_fn, leak_bce, cfg, leak_idx, device,
+            cls_loss_fn, leak_bce, cfg, leak_idx, model_leak_idx, device,
             use_ta, time_mask, freq_mask, interrupted
         )
 
@@ -2334,13 +2364,19 @@ def train(cfg=None):
 
     train_ds, val_ds, class_names, original_class_names, leak_idx, train_indices, val_subset = setup_datasets(cfg)
     
-    # In binary mode, model outputs 2 classes where LEAK is at index 1
-    # In multi-class mode, LEAK is at original leak_idx
+    # Determine model output index for LEAK class based on mode
+    # Binary mode: model outputs [NOLEAK, LEAK], so LEAK is at index 1
+    # Multi-class: model outputs original classes, LEAK at original leak_idx
     model_leak_idx = 1 if cfg.binary_mode else leak_idx
     
+    # Setup DataLoaders with optional BinaryLabelDataset wrapping for training
     train_loader, val_loader, train_sampler = setup_dataloaders(cfg, train_ds, train_indices, val_subset, leak_idx, cfg.binary_mode)
     
-    # Update val_ds to wrapped version for file-level evaluation in binary mode
+    # Critical: Wrap val_ds for file-level evaluation in binary mode
+    # The file-level eval accesses ds._labels directly from HDF5, which are
+    # still multi-class (0-4). But it uses model_leak_idx=1 to extract LEAK
+    # probabilities from the model's binary output. This wrapper ensures
+    # attribute forwarding works correctly for HDF5 access.
     if cfg.binary_mode:
         val_ds = BinaryLabelDataset(val_ds, leak_idx)
     
