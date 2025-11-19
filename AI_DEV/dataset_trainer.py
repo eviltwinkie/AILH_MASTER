@@ -97,6 +97,13 @@ except Exception:
     pynvml = None  # type: ignore
     _HAS_NVML = False
 
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except Exception:
+    psutil = None  # type: ignore
+    _HAS_PSUTIL = False
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -360,8 +367,8 @@ class Config:
     log_dir: Path = Path("/DEVELOPMENT/DATASET_REFERENCE/LOGS")
 
     # ========== TRAINING HYPERPARAMETERS ==========
-    batch_size: int = 5632              # Training batch size (tuned for RTX 5090 24GB)
-    val_batch_size: int = 2048          # Validation batch size (can be larger, no gradients)
+    batch_size: int = 16384             # Training batch size (maximized for GPU utilization)
+    val_batch_size: int = 8192          # Validation batch size (maximized for throughput)
     epochs: int = 200                   # Maximum training epochs
     learning_rate: float = 1e-3         # Initial learning rate for AdamW
     dropout: float = 0.25               # Dropout probability for regularization
@@ -385,8 +392,8 @@ class Config:
     leak_oversample_factor: int = 1     # Duplicate LEAK segments N times (1=disabled)
 
     # ========== DATALOADER CONFIGURATION ==========
-    num_workers: int = 4                # Parallel data loading workers (less overhead)
-    prefetch_factor: int = 8            # Batches to prefetch per worker (deeper queue)
+    num_workers: int = 12               # Parallel data loading workers (maximized for throughput)
+    prefetch_factor: int = 24           # Batches to prefetch per worker (extreme prefetch)
     persistent_workers: bool = True     # Keep workers alive between epochs
     pin_memory: bool = True             # Pin memory for faster GPU transfer
 
@@ -520,6 +527,117 @@ def device_setup() -> torch.device:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required.")
     return torch.device("cuda")
+
+
+class SystemMonitor:
+    """
+    Real-time system resource monitor for training.
+    
+    Monitors:
+    - GPU utilization % (via NVML)
+    - VRAM usage GB (allocated/total)
+    - CPU utilization % (via psutil)
+    - RAM usage GB (used/total)
+    
+    Provides live status updates during training to identify bottlenecks.
+    """
+    def __init__(self, device: torch.device, enabled: bool = True):
+        self.device = device
+        self.enabled = enabled
+        self.nvml_handle = None
+        self.process = None
+        
+        # Initialize NVML for GPU monitoring
+        if enabled and _HAS_NVML and pynvml is not None and device.type == 'cuda':
+            try:
+                pynvml.nvmlInit()
+                self.nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(device.index or 0)
+            except Exception:
+                self.nvml_handle = None
+        
+        # Initialize psutil for CPU/RAM monitoring
+        if enabled and _HAS_PSUTIL and psutil is not None:
+            try:
+                self.process = psutil.Process()
+            except Exception:
+                self.process = None
+    
+    def get_stats(self) -> Dict[str, float]:
+        """Get current system statistics."""
+        stats = {}
+        
+        # GPU metrics
+        if self.nvml_handle is not None and pynvml is not None:
+            try:
+                util = pynvml.nvmlDeviceGetUtilizationRates(self.nvml_handle)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.nvml_handle)
+                stats['gpu_util'] = util.gpu  # type: ignore
+                mem_used = float(mem_info.used)  # type: ignore
+                mem_total = float(mem_info.total)  # type: ignore
+                stats['vram_used_gb'] = mem_used / (1024**3)
+                stats['vram_total_gb'] = mem_total / (1024**3)
+                stats['vram_percent'] = (mem_used / mem_total) * 100
+            except Exception:
+                stats['gpu_util'] = -1
+                stats['vram_used_gb'] = -1
+                stats['vram_total_gb'] = -1
+                stats['vram_percent'] = -1
+        else:
+            # Fallback to PyTorch for VRAM
+            if self.device.type == 'cuda':
+                try:
+                    stats['vram_used_gb'] = torch.cuda.memory_allocated(self.device) / (1024**3)
+                    stats['vram_total_gb'] = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)
+                    stats['vram_percent'] = (stats['vram_used_gb'] / stats['vram_total_gb']) * 100
+                except Exception:
+                    pass
+        
+        # CPU/RAM metrics
+        if _HAS_PSUTIL and psutil is not None:
+            try:
+                stats['cpu_percent'] = psutil.cpu_percent(interval=0)
+                mem = psutil.virtual_memory()
+                stats['ram_used_gb'] = mem.used / (1024**3)
+                stats['ram_total_gb'] = mem.total / (1024**3)
+                stats['ram_percent'] = mem.percent
+            except Exception:
+                stats['cpu_percent'] = -1
+                stats['ram_used_gb'] = -1
+                stats['ram_total_gb'] = -1
+                stats['ram_percent'] = -1
+        
+        return stats
+    
+    def format_stats(self) -> str:
+        """Format statistics as human-readable string."""
+        stats = self.get_stats()
+        parts = []
+        
+        # GPU info
+        if 'gpu_util' in stats and stats['gpu_util'] >= 0:
+            parts.append(f"GPU:{stats['gpu_util']:3.0f}%")
+        
+        # VRAM info
+        if 'vram_used_gb' in stats and stats['vram_used_gb'] >= 0:
+            parts.append(f"VRAM:{stats['vram_used_gb']:4.1f}/{stats['vram_total_gb']:.1f}GB({stats['vram_percent']:4.1f}%)")
+        
+        # CPU info
+        if 'cpu_percent' in stats and stats['cpu_percent'] >= 0:
+            parts.append(f"CPU:{stats['cpu_percent']:5.1f}%")
+        
+        # RAM info
+        if 'ram_used_gb' in stats and stats['ram_used_gb'] >= 0:
+            parts.append(f"RAM:{stats['ram_used_gb']:4.1f}/{stats['ram_total_gb']:.1f}GB({stats['ram_percent']:4.1f}%)")
+        
+        return " | ".join(parts) if parts else "N/A"
+    
+    def __del__(self):
+        """Cleanup NVML resources."""
+        if self.nvml_handle is not None and _HAS_NVML and pynvml is not None:
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
 
 
 class GPUProfiler:
@@ -1727,6 +1845,9 @@ def train_one_epoch(
     correct_count = torch.tensor(0, device=device, dtype=torch.int64)  # Accumulate on GPU
     seen = 0
     
+    # System monitoring
+    sys_monitor = SystemMonitor(device, enabled=True)
+    
     # Performance profiling
     profiler = GPUProfiler(device, enabled=cfg.profile_gpu_util) if cfg.profile_performance else None
     if profiler:
@@ -1736,6 +1857,9 @@ def train_one_epoch(
     batch_times = []
     dataloader_times = []
     prev_batch_end = time.perf_counter()
+    
+    # Sample system stats every N batches
+    report_interval = max(1, len(train_loader) // 10)  # 10 reports per epoch
     
     for batch_idx, (mel_batch, labels) in enumerate(train_loader):
         # Measure DataLoader iterator time (CPU→GPU data pipeline)
@@ -1805,6 +1929,12 @@ def train_one_epoch(
         batch_elapsed = time.perf_counter() - batch_start
         batch_times.append(batch_elapsed)
         prev_batch_end = time.perf_counter()  # For next iteration's DataLoader timing
+        
+        # Update progress bar with system stats periodically
+        if batch_idx % report_interval == 0 or batch_idx == len(train_loader) - 1:
+            stats_str = sys_monitor.format_stats()
+            pbar.set_postfix_str(stats_str)
+        
         pbar.update(1)
     
     pbar.close()
@@ -1813,6 +1943,9 @@ def train_one_epoch(
     correct = int(correct_count.item())
     train_loss = running_loss / max(seen, 1)
     train_acc = correct / max(seen, 1)
+    
+    # Collect final system stats for epoch summary
+    final_stats = sys_monitor.get_stats()
     
     # Performance report
     if profiler and cfg.profile_performance:
@@ -1831,6 +1964,19 @@ def train_one_epoch(
             if avg_iter > 0.050:  # > 50ms is a bottleneck
                 logger.warning("%s⚠️  DataLoader is slow (%.1fms avg)! Consider increasing prefetch_factor or num_workers%s",
                               YELLOW, avg_iter * 1000, RESET)
+    
+    # Print epoch summary with resource utilization
+    logger.info("%s[EPOCH %d SUMMARY] Loss: %.4f | Acc: %.2f%% | %s%s",
+               CYAN, epoch, train_loss, train_acc * 100, sys_monitor.format_stats(), RESET)
+    
+    # Alert if GPU utilization is low (bottleneck detection)
+    if 'gpu_util' in final_stats and final_stats['gpu_util'] >= 0 and final_stats['gpu_util'] < 30:
+        logger.warning("%s⚠️  LOW GPU UTILIZATION (%.1f%%)! Possible bottlenecks:%s", 
+                      YELLOW, final_stats['gpu_util'], RESET)
+        logger.warning("%s   - Increase batch_size (current: %d)%s", YELLOW, cfg.batch_size, RESET)
+        logger.warning("%s   - Increase num_workers (current: %d)%s", YELLOW, cfg.num_workers, RESET)
+        logger.warning("%s   - Increase prefetch_factor (current: %d)%s", YELLOW, cfg.prefetch_factor, RESET)
+        logger.warning("%s   - Check DataLoader timing above%s", YELLOW, RESET)
     
     return train_loss, train_acc
 
