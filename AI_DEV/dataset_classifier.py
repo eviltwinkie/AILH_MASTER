@@ -1,4 +1,33 @@
 #!/usr/bin/env python3
+"""
+Dataset Classifier - PyTorch Leak Detection Inference
+
+High-performance inference script for classifying acoustic leak detection datasets using
+PyTorch models. Supports both single-label and multi-label classification with batch processing.
+
+Key Features:
+    - File-level classification with two-stage temporal segmentation
+    - Multi-label support with configurable thresholds
+    - CSV output with per-class probabilities
+    - Batch processing for memory efficiency
+    - GPU acceleration with FP16 inference
+    - Resume capability (skips already classified files)
+
+Input:
+    - WAV files from INFERENCE/ directory
+    - PyTorch model (best.pth) + metadata (model_meta.json)
+
+Output:
+    - classification_report.csv with columns:
+      [filepath, predicted_label, confidence, prob_LEAK, prob_NORMAL, ...]
+
+Usage:
+    Configure paths in script then run: python dataset_classifier.py
+
+Note:
+    Uses builder configuration from model_meta.json to ensure feature extraction
+    alignment with training parameters.
+"""
 # -*- coding: utf-8 -*-
 """
 dataset_classifier_new.py — pragmatic recall-first leak classifier

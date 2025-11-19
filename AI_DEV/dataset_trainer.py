@@ -1,5 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Dataset Trainer - PyTorch Leak Detection Model Training
+
+Production training script for two-stage temporal segmentation leak detection models.
+Implements leak-focused training with auxiliary heads, class weighting, and paper-exact
+file-level evaluation metrics.
+
+Key Features:
+    - Leak-optimized training (weighted CE + auxiliary leak-vs-rest head)
+    - Paper-exact file-level evaluation (50% voting threshold)
+    - Step-accurate resume with StatefulSampler
+    - GPU optimization (AMP, TF32, channels_last, torch.compile)
+    - Checkpoint rotation with configurable keep_last_k
+    - Live GPU monitoring during evaluation
+    - Early stopping based on file-level leak F1
+
+Architecture:
+    - LeakCNNMulti: Dual-head model (multiclass + binary leak detection)
+    - Pool keeps time dimension (2,1) for temporal granularity
+    - AdaptiveAvgPool2d for variable-length inputs
+
+Training Configuration:
+    - Loss: Weighted CrossEntropy + BCE auxiliary leak head
+    - Optimizer: AdamW with CosineAnnealingLR
+    - Batch size: 5120 (training), 2048 (validation)
+    - Mixed precision: FP16 with GradScaler
+    - Gradient clipping: 1.0
+
+Evaluation Metrics:
+    - Segment-level: CrossEntropy loss, top-1 accuracy
+    - File-level (paper-exact): Per-file voting with 50% threshold
+    - Leak metrics: F1, Precision, Recall with threshold sweep
+
+Usage:
+    Edit Config dataclass paths, then run: python dataset_trainer.py
+
+Note:
+    Supports both 2-class (LEAK/NOLEAK) and 5-class configurations.
+    Current default: 2 classes as per research paper.
+"""
 # =============================================================================
 # leak_dataset_trainer_v15.py
 # Focused on LEAK performance:

@@ -1,6 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Directory Classifier - PyTorch Leak Detection Batch Inference
+
+Efficient batch classification for directories of WAV files using PyTorch CNN models.
+Automatically reads builder configuration from HDF5 datasets to ensure alignment with
+training parameters.
+
+Key Features:
+    - No command-line args (edit paths in script)
+    - Auto-loads builder config from HDF5 attributes (config_json, labels_json)
+    - On-the-fly resampling to match training sample rate
+    - Batch processing with configurable segment size (default: 16384)
+    - CSV output with per-class probabilities
+    - Supports both .h5 and .keras model formats
+    - Recursive WAV file discovery
+
+Configuration Auto-Loading:
+    Searches for HDF5 files in this order:
+    1. TRAINING_DATASET.H5
+    2. VALIDATION_DATASET.H5
+    3. TESTING_DATASET.H5
+    4. LEAK_DATASET.H5
+    
+    Extracts: sample_rate, n_fft, hop_length, n_mels, power, center,
+              long_window, short_window, duration_sec, class labels
+
+Model Architecture:
+    LeakCNN - Standard CNN architecture matching training configuration
+
+Input/Output:
+    INPUT:  STAGE_DIR/INFERENCE/ (or fallback to STAGE_DIR/TESTING/)
+    OUTPUT: STAGE_DIR/PROC_REPORTS/classification_report.csv
+
+CSV Format:
+    filepath, predicted_label, predicted_confidence, prob_LEAK, prob_NORMAL, ...
+
+Usage:
+    Edit STAGE_DIR, INPUT_DIR, OUTPUT_CSV paths then run: python directory_classifier.py
+"""
+"""
 leak_directory_classifier_v2.py
 -------------------------------------------------------------------
 No command-line args. Configure paths below.

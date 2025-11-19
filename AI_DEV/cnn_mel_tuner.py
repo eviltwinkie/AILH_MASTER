@@ -1,4 +1,35 @@
-import os
+#!/usr/bin/env python3
+"""
+CNN Mel Hyperparameter Tuning with Optuna
+
+Automated hyperparameter optimization for CNN leak detection models using Optuna framework.
+Performs intelligent search over model architecture and training parameters to find optimal
+configuration.
+
+Hyperparameters Optimized:
+    - Architecture: kernel_size, n_filters, n_mels, n_fft, n_conv_blocks, max_poolings
+    - Training: hop_length, dropout
+    - Temporal segmentation: long_term_sec, short_term_sec, stride_sec
+
+Features:
+    - Persistent SQLite study storage (auto-resume capability)
+    - MedianPruner for early trial termination
+    - GPU memory-aware batch size detection
+    - Automatic cache cleanup between trials
+    - Visualization plots (optimization history, parameter importances)
+    - Data-specific study naming (hash-based)
+
+Usage:
+    python cnn_mel_tuner.py [--restart] [--n_trials 100] [--jobs 1]
+
+Output:
+    - Best parameters saved to plots/best_trial_params.json
+    - Optuna database: optuna_study_{hash}.db
+    - Visualization plots in OPTUNA_PLOTS/
+
+Dashboard:
+    optuna-dashboard sqlite:///optuna_study_{hash}.db --study-name cnn_mel_study_{hash}
+"""
 
 from old_config import SAMPLE_RATE, CACHE_DIR
 

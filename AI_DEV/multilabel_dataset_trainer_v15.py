@@ -1,5 +1,68 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Multi-Label Dataset Trainer v15 - Production Leak Detection Training
+
+Leak-optimized training script for multi-label acoustic leak detection models.
+Implements dual-head architecture with class weighting, auxiliary leak detection,
+and paper-exact file-level evaluation metrics.
+
+Key Features:
+    - Dual-head architecture (multiclass + binary leak-vs-rest)
+    - Class-weighted or Focal loss for imbalanced datasets
+    - Optional LEAK class oversampling at segment level
+    - Paper-exact file-level evaluation with 50% voting threshold
+    - Step-accurate resume with StatefulSampler
+    - GPU optimizations (AMP, TF32, channels_last, torch.compile)
+    - Rolling checkpoint management (keep last K)
+    - Live GPU/CPU monitoring during evaluation
+    - Early stopping based on leak F1 score
+    - Optional SpecAugment data augmentation
+
+Architecture - LeakCNNMulti:
+    Conv2D(1→32) → Conv2D(32→64) → MaxPool(2,1) →
+    Conv2D(64→128) → MaxPool(2,1) → AdaptiveAvgPool2d(16,1) →
+    Dropout(0.25) → FC(2048→256) →
+    ├── Classification head (256→n_classes)
+    └── Leak detection head (256→1)
+
+Training Strategy:
+    - Primary loss: Weighted CrossEntropy or Focal Loss
+    - Auxiliary loss: BCEWithLogitsLoss (leak-vs-rest)
+    - Combined: L_total = L_primary + λ*L_auxiliary (λ=0.5)
+    - Optimizer: AdamW with CosineAnnealingLR
+    - Mixed precision: FP16 with GradScaler
+    - Gradient clipping: 1.0
+
+File-Level Evaluation (Paper-Exact):
+    1. For each file, process all long×short segments
+    2. Compute leak probability per short segment:
+       p = 0.5*softmax(logits)[leak_idx] + 0.5*sigmoid(leak_logit)
+    3. Average probabilities within each long segment
+    4. File classified as LEAK if ≥50% of long segments have p ≥ threshold
+
+Configuration:
+    Defaults optimized for 5-class problem (LEAK, NORMAL, QUIET, RANDOM, MECHANICAL)
+    Adjust Config dataclass for 2-class (LEAK/NOLEAK) or 6-class (+UNCLASSIFIED)
+
+Dataset Requirements:
+    - TRAINING_DATASET.H5   (built by multilabel_dataset_builder_v15.py)
+    - VALIDATION_DATASET.H5
+    - TESTING_DATASET.H5 (optional, for final evaluation)
+
+Output Files:
+    MODEL_DIR/best.pth             - Best model weights (by file-level F1)
+    MODEL_DIR/model_meta.json      - Metadata with threshold and config
+    MODEL_DIR/checkpoints/last.pth - Latest checkpoint for resume
+    MODEL_DIR/checkpoints/epoch_*.pth - Rolling checkpoints
+
+Usage:
+    Edit Config dataclass paths and hyperparameters, then run:
+    python multilabel_dataset_trainer_v15.py
+
+CTRL-C Handling:
+    Gracefully saves checkpoint before exit (SIGINT/SIGTERM handlers)
+"""
 # =============================================================================
 # leak_dataset_trainer_v15.py
 # Focused on LEAK performance:

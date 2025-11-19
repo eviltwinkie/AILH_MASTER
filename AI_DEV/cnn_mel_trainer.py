@@ -1,4 +1,32 @@
-import os
+#!/usr/bin/env python3
+"""
+CNN Mel Spectrogram Model Trainer
+
+Main training script for CNN-based acoustic leak detection models using mel spectrograms.
+Implements complete training pipeline with GPU optimization, dynamic batch sizing, and
+comprehensive error handling.
+
+Key Features:
+    - Automatic batch size detection to maximize GPU utilization
+    - Robust OOM (Out-of-Memory) recovery with automatic batch size reduction  
+    - Class-weighted loss for imbalanced datasets
+    - Early stopping with model checkpointing
+    - Training/validation loss and accuracy plotting
+    - Optuna hyperparameter integration
+
+Training Pipeline:
+    1. Load and cache mel spectrogram features (with parallel processing)
+    2. Build auto-scaling CNN architecture based on input dimensions
+    3. Find safe batch size via iterative testing
+    4. Train with robust OOM handling
+    5. Save best model and generate training plots
+
+Usage:
+    python cnn_mel_trainer.py --train [--cache clear|force|only] [--plot]
+
+Note:
+    Uses parameters from old_config. Verify against global_config.py before training!
+"""
 
 from old_config import BASE_DIR, MIN_BATCH_SIZE, MAX_BATCH_SIZE, HOP_LENGTH, LONG_TERM_SEC, SHORT_TERM_SEC, STRIDE_SEC, N_MELS, N_FFT, SAMPLE_RATE, MAX_THREAD_WORKERS, CPU_COUNT
 

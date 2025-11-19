@@ -1,4 +1,26 @@
-from old_config import SAMPLE_RATE, CNN_BATCH_SIZE, MAX_THREAD_WORKERS, N_FFT, HOP_LENGTH, N_MELS, LONG_TERM_SEC, SHORT_TERM_SEC, STRIDE_SEC, CACHE_DIR, MAX_THREAD_WORKERS, TMPDIR
+#!/usr/bin/env python3
+"""
+CNN Mel Spectrogram Processor
+
+Core processing module for mel spectrogram feature extraction with GPU acceleration.
+Implements efficient data loading, segmentation, and mel transform computation using
+PyTorch, TorchAudio, and multiprocessing.
+
+Key Features:
+    - GPU-accelerated mel spectrogram computation (batch processing)
+    - Multi-threaded WAV file loading and segmentation
+    - Two-stage temporal segmentation (long-term + short-term)
+    - HDF5 caching with automatic cleanup
+    - Memory-mapped arrays for large datasets
+
+Functions:
+    - load_wavs_parallel: Main entry point for parallel WAV processing
+    - batch_mel_spectrogram: GPU-accelerated batch mel computation
+    - wav_segment_worker: Worker function for parallel segmentation
+
+Configuration:
+    Uses parameters from old_config module. Note: These may differ from global_config.py!
+"""
 
 import h5py
 import time
