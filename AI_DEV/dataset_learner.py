@@ -1,6 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Dataset Continual Learning Module
+
+Implements continual/incremental learning for PyTorch leak detection models.
+Processes new WAV files from LEARNING directory and updates existing model weights
+while preserving previously learned knowledge.
+
+Key Features:
+    - Continual learning from LEARNING/ directory WAV files
+    - On-the-fly WAV resampling and mel spectrogram extraction
+    - Reads builder config from model metadata for consistency
+    - Uses existing VALIDATION_DATASET.H5 for evaluation
+    - Leak threshold sweep for optimal F1 score
+    - Checkpoint management with auto-resume capability
+
+Workflow:
+    1. Load model metadata and builder configuration
+    2. Stream and process WAV files from LEARNING/ directory
+    3. Perform incremental training epochs (default: 30)
+    4. Evaluate on validation set with leak threshold optimization
+    5. Update best.pth and model_meta.json when F1 improves
+
+Directory Structure:
+    STAGE_DIR/LEARNING/           - New WAV files organized by label (LEAK, NOLEAK)
+    STAGE_DIR/VALIDATION_DATASET.H5 - Validation set for evaluation
+    MODEL_DIR/best.pth            - Model weights (updated in-place)
+    MODEL_DIR/model_meta.json     - Model metadata (updated with new threshold)
+
+Note:
+    Only supports LEAK and NOLEAK labels. Other labels are ignored.
+"""
 leak_dataset_learner.py (NO-CLI)
 • Continual learning on WAVs under STAGE_DIR/LEARNING (same label folder structure).
 • Reads builder config + class names from MODEL_DIR/model_meta.json to guarantee

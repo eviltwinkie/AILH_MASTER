@@ -1,3 +1,26 @@
+#!/usr/bin/env python3
+"""
+CNN Mel Incremental Learning Module
+
+Implements incremental/continual learning for acoustic leak detection models.
+Processes new WAV files from UPDATE_DATA directory, standardizes them, and
+performs incremental training on the existing model.
+
+Features:
+    - Automatic WAV file standardization (resampling, padding, splitting)
+    - Incremental model updates without full retraining
+    - Label encoder compatibility checking
+    - Support for both .h5 and .keras model formats
+
+Directory Structure:
+    UPDATE_DATA/RAW/          - Raw input WAV files organized by label
+    UPDATE_DATA/PROCESSED/    - Standardized WAV files ready for training
+    CNN_CACHE/                - Cached label encoders and features
+
+Note:
+    Most of the incremental learning logic is currently commented out.
+    Active functionality is limited to WAV file preprocessing.
+"""
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import pickle

@@ -1,6 +1,53 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Multi-Label Dataset Continual Learning Module
+
+Incremental learning implementation for multi-label leak detection models (2-class variant).
+Performs continual training on new WAV files while preserving learned knowledge.
+
+Key Features:
+    - Continual learning from LEARNING/ directory
+    - Streaming WAV processing (no full dataset reload)
+    - Mel spectrogram computation on-the-fly with GPU acceleration
+    - File-level paper-exact evaluation metric
+    - Checkpoint management with rolling backup (keep last K)
+    - Auto-resume from last checkpoint
+    - Live GPU monitoring during evaluation
+
+Architecture:
+    LeakCNNMulti - Dual-head model:
+    - Main head: Multiclass classification logits
+    - Auxiliary head: Binary leak detection (leak-vs-rest)
+
+Learning Configuration:
+    - Epochs: 30 (default)
+    - Batch size: 8192 segments
+    - Learning rate: 5e-4
+    - Optimizer: AdamW with CosineAnnealingLR
+    - Loss: CrossEntropyLoss
+    - Gradient clipping: 1.0
+
+File-Level Evaluation (Paper-Exact):
+    For each file:
+    1. Process all short segments in each long segment
+    2. Compute leak probability: 0.5*softmax(leak_class) + 0.5*sigmoid(aux_leak)
+    3. Average probabilities within each long segment
+    4. File is LEAK if ≥50% of long segments have prob ≥ threshold (0.5)
+
+Directory Structure:
+    STAGE_DIR/LEARNING/           - New labeled WAV files (LEAK/, NOLEAK/)
+    STAGE_DIR/VALIDATION_DATASET.H5 - Validation set for evaluation
+    MODEL_DIR/best.pth            - Model weights (updated on improvement)
+    MODEL_DIR/model_meta.json     - Metadata with leak threshold
+    MODEL_DIR/checkpoints/        - Rolling checkpoints
+
+Allowed Labels:
+    LEAK, NOLEAK only (others ignored)
+
+Usage:
+    Edit paths in script, then run: python multilabel_dataset_learner.py
+"""
 leak_dataset_learner.py (NO-CLI)
 • Continual learning on WAVs under STAGE_DIR/LEARNING (same label folder structure).
 • Reads builder config + class names from MODEL_DIR/model_meta.json to guarantee
