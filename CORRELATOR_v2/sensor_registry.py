@@ -7,7 +7,7 @@ for multi-sensor leak localization.
 
 Author: AILH Development Team
 Date: 2025-11-19
-Version: 2.0.0
+Version: 3.2.0
 """
 
 import json
@@ -24,11 +24,12 @@ class SensorPosition:
     latitude: float
     longitude: float
     elevation: float = 0.0  # meters above sea level
+    depth_meters: float = 0.0  # depth below ground/surface (v3.2)
 
 
 @dataclass
 class SensorInfo:
-    """Complete information about a sensor."""
+    """Complete information about a sensor (v3.2 enhanced with environmental params)."""
     sensor_id: str
     name: str
     position: SensorPosition
@@ -36,6 +37,10 @@ class SensorInfo:
     site_name: str
     logger_id: str
     calibration: Optional[Dict] = None
+    # Environmental parameters (v3.2)
+    temperature_C: Optional[float] = None  # Water temperature at sensor
+    pressure_bar: Optional[float] = None   # Water pressure at sensor
+    gain_db: Optional[float] = None        # Sensor gain setting
 
 
 @dataclass
@@ -332,6 +337,100 @@ class SensorRegistry:
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
         return R * c
+
+    def calculate_3d_distance(self, sensor_a: str, sensor_b: str, use_depth: bool = True) -> float:
+        """
+        Calculate 3D distance between two sensors accounting for depth (v3.2).
+
+        When sensors are at different depths (e.g., hillside installations), the
+        straight-line distance differs from horizontal GPS distance.
+
+        Args:
+            sensor_a (str): First sensor ID
+            sensor_b (str): Second sensor ID
+            use_depth (bool): Include depth in calculation (default: True)
+
+        Returns:
+            3D distance in meters
+
+        Notes:
+            3D distance = sqrt(horizontal_distance^2 + (depth_b - depth_a)^2)
+        """
+        info_a = self.get_sensor(sensor_a)
+        info_b = self.get_sensor(sensor_b)
+
+        if info_a is None:
+            raise ValueError(f"Sensor {sensor_a} not found")
+        if info_b is None:
+            raise ValueError(f"Sensor {sensor_b} not found")
+
+        # Horizontal distance (GPS haversine)
+        horizontal_dist = self._haversine_distance(
+            info_a.position.latitude, info_a.position.longitude,
+            info_b.position.latitude, info_b.position.longitude
+        )
+
+        if not use_depth:
+            return horizontal_dist
+
+        # Depth difference
+        depth_a = info_a.position.depth_meters
+        depth_b = info_b.position.depth_meters
+        depth_diff = depth_b - depth_a
+
+        # 3D distance using Pythagoras
+        distance_3d = math.sqrt(horizontal_dist ** 2 + depth_diff ** 2)
+
+        return distance_3d
+
+    def get_environmental_wave_speed(
+        self,
+        sensor_a: str,
+        sensor_b: str,
+        base_wave_speed: float
+    ) -> float:
+        """
+        Calculate average wave speed with environmental corrections (v3.2).
+
+        Uses temperature and pressure at both sensors to correct the base wave speed.
+
+        Args:
+            sensor_a (str): First sensor ID
+            sensor_b (str): Second sensor ID
+            base_wave_speed (float): Base material wave speed (m/s)
+
+        Returns:
+            Average corrected wave speed (m/s)
+
+        Notes:
+            - Averages environmental conditions from both sensors
+            - Falls back to default conditions if sensor data unavailable
+        """
+        info_a = self.get_sensor(sensor_a)
+        info_b = self.get_sensor(sensor_b)
+
+        if info_a is None or info_b is None:
+            # Can't apply corrections without sensor info
+            return base_wave_speed
+
+        # Get environmental parameters (with defaults)
+        temp_a = info_a.temperature_C if info_a.temperature_C is not None else DEFAULT_TEMPERATURE_C
+        temp_b = info_b.temperature_C if info_b.temperature_C is not None else DEFAULT_TEMPERATURE_C
+        pressure_a = info_a.pressure_bar if info_a.pressure_bar is not None else DEFAULT_PRESSURE_BAR
+        pressure_b = info_b.pressure_bar if info_b.pressure_bar is not None else DEFAULT_PRESSURE_BAR
+
+        # Average environmental conditions
+        avg_temp = (temp_a + temp_b) / 2.0
+        avg_pressure = (pressure_a + pressure_b) / 2.0
+
+        # Apply environmental corrections
+        corrected_speed = calculate_environmental_wave_speed(
+            base_speed_mps=base_wave_speed,
+            temperature_C=avg_temp,
+            pressure_bar=avg_pressure
+        )
+
+        return corrected_speed
 
     def interpolate_leak_position(
         self,

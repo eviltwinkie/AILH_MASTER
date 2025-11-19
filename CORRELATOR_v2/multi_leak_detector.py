@@ -23,7 +23,7 @@ Based on AILH pipeline optimizations:
 
 Author: AILH Development Team
 Date: 2025-11-19
-Version: 3.0.0 (Enhanced)
+Version: 3.2.0 (Enhanced with v1 features)
 """
 
 import numpy as np
@@ -63,11 +63,20 @@ from scipy.cluster.hierarchy import linkage, fcluster
 
 from correlator_config import *
 from time_delay_estimator import TimeDelayEstimate
+from statistical_features import StatisticalFeatureExtractor, SignalStatistics
 
 
 @dataclass
 class MultiLeakPeak:
-    """Detected peak in correlation representing potential leak."""
+    """
+    Detected peak in correlation representing potential leak (v3.2 enhanced).
+
+    Includes advanced statistical features from v1:
+    - RMS (signal energy)
+    - Kurtosis (impulsiveness)
+    - Spectral entropy (complexity)
+    - Dominant frequency (leak signature)
+    """
     peak_index: int
     time_delay_seconds: float
     time_delay_samples: float
@@ -78,6 +87,11 @@ class MultiLeakPeak:
     peak_sharpness: float
     frequency_band: Optional[str] = None  # 'low', 'mid', 'high', 'full'
     cluster_id: Optional[int] = None
+    # Statistical features (v3.2)
+    rms: Optional[float] = None              # Root mean square (signal energy)
+    kurtosis: Optional[float] = None         # Signal impulsiveness
+    spectral_entropy: Optional[float] = None # Frequency complexity
+    dominant_frequency_hz: Optional[float] = None  # Peak frequency component
 
 
 @dataclass
@@ -240,7 +254,9 @@ class EnhancedMultiLeakDetector:
                     correlation, lags,
                     sensor_separation_m, wave_speed_mps,
                     n_peaks=max_leaks,
-                    band_name=band_name
+                    band_name=band_name,
+                    signal_a=sig_a_filtered,  # v3.2: Pass signals for statistical features
+                    signal_b=sig_b_filtered
                 )
 
                 all_peaks.extend(peaks)
@@ -258,6 +274,8 @@ class EnhancedMultiLeakDetector:
                 correlation, lags,
                 sensor_separation_m, wave_speed_mps,
                 n_peaks=max_leaks,
+                signal_a=signal_a,  # v3.2: Pass signals for statistical features
+                signal_b=signal_b,
                 band_name='full'
             )
             all_peaks.extend(peaks)
@@ -449,10 +467,12 @@ class EnhancedMultiLeakDetector:
         sensor_separation_m: float,
         wave_speed_mps: float,
         n_peaks: int = 10,
-        band_name: str = 'full'
+        band_name: str = 'full',
+        signal_a: Optional[np.ndarray] = None,
+        signal_b: Optional[np.ndarray] = None
     ) -> List[MultiLeakPeak]:
         """
-        Find peaks in correlation using GPU-accelerated methods.
+        Find peaks in correlation using GPU-accelerated methods (v3.2 enhanced).
 
         Args:
             correlation: Correlation function
@@ -461,10 +481,17 @@ class EnhancedMultiLeakDetector:
             wave_speed_mps: Wave speed
             n_peaks: Number of peaks to find
             band_name: Frequency band name
+            signal_a: Original signal from sensor A (for statistical features)
+            signal_b: Original signal from sensor B (for statistical features)
 
         Returns:
-            List of MultiLeakPeak objects
+            List of MultiLeakPeak objects with statistical features
         """
+        # Initialize statistical feature extractor (v3.2)
+        feature_extractor = StatisticalFeatureExtractor(
+            sample_rate=self.sample_rate,
+            verbose=False
+        ) if signal_a is not None else None
         # Peak detection parameters
         height = MIN_PEAK_HEIGHT * np.max(np.abs(correlation))
         distance = int(0.01 * self.sample_rate)  # 10ms minimum separation
@@ -534,6 +561,19 @@ class EnhancedMultiLeakDetector:
             # Confidence score
             confidence = self._compute_confidence(peak_height, snr_db, sharpness)
 
+            # Extract statistical features (v3.2)
+            rms, kurt, spec_entropy, dom_freq = None, None, None, None
+            if feature_extractor is not None and signal_a is not None:
+                try:
+                    # Extract features from signal A (typically the reference sensor)
+                    stats = feature_extractor.extract_features(signal_a)
+                    rms = stats.rms
+                    kurt = stats.kurtosis
+                    spec_entropy = stats.spectral_entropy
+                    dom_freq = stats.dominant_frequency_hz
+                except Exception:
+                    pass  # Features optional, don't fail if extraction fails
+
             peak = MultiLeakPeak(
                 peak_index=int(idx),
                 time_delay_seconds=time_delay_sec,
@@ -543,7 +583,12 @@ class EnhancedMultiLeakDetector:
                 snr_db=snr_db,
                 peak_height=peak_height,
                 peak_sharpness=sharpness,
-                frequency_band=band_name
+                frequency_band=band_name,
+                # Statistical features (v3.2)
+                rms=rms,
+                kurtosis=kurt,
+                spectral_entropy=spec_entropy,
+                dominant_frequency_hz=dom_freq
             )
 
             peaks.append(peak)

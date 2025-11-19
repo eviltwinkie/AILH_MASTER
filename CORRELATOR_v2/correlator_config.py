@@ -7,7 +7,7 @@ leak detection correlator system. It extends the global_config.py from AILH_MAST
 
 Author: AILH Development Team
 Date: 2025-11-19
-Version: 2.0.0
+Version: 3.2.0
 """
 
 import os
@@ -39,6 +39,77 @@ WAVE_SPEEDS = {
 # Default pipe material if not specified
 DEFAULT_PIPE_MATERIAL = 'ductile_iron'
 DEFAULT_WAVE_SPEED = WAVE_SPEEDS[DEFAULT_PIPE_MATERIAL]
+
+# ------------------------------------------------------------------------------
+# Environmental Corrections (v3.2)
+# ------------------------------------------------------------------------------
+
+# Water properties for acoustic velocity calculations
+WATER_REFERENCE_TEMP_C = 20.0           # Reference temperature (°C)
+WATER_REFERENCE_PRESSURE_BAR = 1.0      # Reference pressure (bar, ~atmospheric)
+
+# Temperature coefficient for water (m/s per °C)
+# Speed of sound in water increases ~2.4 m/s per °C
+WATER_TEMP_COEFFICIENT = 2.4
+
+# Pressure coefficient for water (m/s per bar)
+# Speed of sound in water increases ~0.16 m/s per bar
+WATER_PRESSURE_COEFFICIENT = 0.16
+
+# Default environmental conditions
+DEFAULT_TEMPERATURE_C = 20.0            # Default water temperature
+DEFAULT_PRESSURE_BAR = 1.0              # Default pressure (atmospheric)
+
+def calculate_environmental_wave_speed(
+    base_speed_mps: float,
+    temperature_C: float = DEFAULT_TEMPERATURE_C,
+    pressure_bar: float = DEFAULT_PRESSURE_BAR,
+    apply_correction: bool = True
+) -> float:
+    """
+    Calculate wave speed with environmental corrections.
+
+    The acoustic velocity in water-filled pipes varies with temperature and pressure.
+    This function applies corrections to the base material wave speed.
+
+    Args:
+        base_speed_mps: Base wave speed for pipe material (m/s)
+        temperature_C: Water temperature (°C)
+        pressure_bar: Water pressure (bar)
+        apply_correction: If False, return base speed without corrections
+
+    Returns:
+        Corrected wave speed (m/s)
+
+    Notes:
+        - Temperature effect: ~2.4 m/s per °C (water acoustic property)
+        - Pressure effect: ~0.16 m/s per bar (water compressibility)
+        - Corrections are additive for small variations from reference conditions
+
+    Examples:
+        >>> # Ductile iron at 15°C and 5 bar
+        >>> calculate_environmental_wave_speed(1400, temperature_C=15, pressure_bar=5)
+        1388.4  # Lower temp reduces speed, higher pressure increases it
+
+        >>> # Steel at 25°C and atmospheric pressure
+        >>> calculate_environmental_wave_speed(5000, temperature_C=25, pressure_bar=1)
+        5012.0  # Higher temp increases speed
+    """
+    if not apply_correction:
+        return base_speed_mps
+
+    # Temperature correction (relative to reference temperature)
+    temp_delta = temperature_C - WATER_REFERENCE_TEMP_C
+    temp_correction = WATER_TEMP_COEFFICIENT * temp_delta
+
+    # Pressure correction (relative to reference pressure)
+    pressure_delta = pressure_bar - WATER_REFERENCE_PRESSURE_BAR
+    pressure_correction = WATER_PRESSURE_COEFFICIENT * pressure_delta
+
+    # Apply corrections
+    corrected_speed = base_speed_mps + temp_correction + pressure_correction
+
+    return corrected_speed
 
 # ------------------------------------------------------------------------------
 # Correlation Methods
