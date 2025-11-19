@@ -1,5 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Multi-Label Dataset Builder v15 - HDF5 Dataset Construction
+
+Production dataset builder for acoustic leak detection using two-stage temporal segmentation.
+Processes WAV files from labeled directories and generates HDF5 datasets with pre-computed
+mel spectrograms for efficient training.
+
+Key Features:
+    - Two-stage temporal segmentation (long-term + short-term windows)
+    - GPU-accelerated mel spectrogram computation (batch processing)
+    - Multi-threaded WAV loading and resampling
+    - HDF5 output with compression and chunking optimization
+    - Stores builder config and labels as HDF5 attributes
+    - Support for multiple label sets (2-class, 5-class, 6-class)
+    - Automatic train/validation/test splitting (70/20/10)
+
+Two-Stage Segmentation:
+    Stage 1 (Long-term): Divide signal into long windows
+    Stage 2 (Short-term): Subdivide each long window into short segments
+    
+    Example: 5-second audio at 8192 Hz
+    - Long window: 2048 samples → 20 long segments
+    - Short window: 512 samples → 4 short segments per long
+    - Total: 80 segments per file
+
+HDF5 Dataset Structure:
+    /segments_mel  - Shape: [files, num_long, num_short, n_mels, time_frames]
+    /labels        - Shape: [files] with integer class labels
+    Attributes:
+        - config_json: Builder configuration (sample_rate, n_fft, etc.)
+        - labels_json: Class names list
+
+Output Files:
+    - TRAINING_DATASET.H5   (70% of data)
+    - VALIDATION_DATASET.H5 (20% of data)
+    - TESTING_DATASET.H5    (10% of data)
+
+Supported Label Sets:
+    2-class: LEAK, NOLEAK
+    5-class: LEAK, NORMAL, QUIET, RANDOM, MECHANICAL
+    6-class: + UNCLASSIFIED
+
+Usage:
+    Configure paths and labels in script, then run: python multilabel_dataset_builder_v15.py
+"""
 # =============================================================================
 # # leak_dataset_builder_v15.py
 # Multi-split leak dataset builder:

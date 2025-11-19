@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""
+Dataset Builder Module
+
+Placeholder module for dataset construction functionality.
+Currently contains only imports with no active implementation.
+
+Note:
+    This appears to be a stub or template file. The actual dataset building
+    functionality is implemented in multilabel_dataset_builder_v15.py.
+
+    Consider using multilabel_dataset_builder_v15.py for production dataset creation.
+"""
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # =============================================================================
 # # leak_dataset_builder_v15.py
