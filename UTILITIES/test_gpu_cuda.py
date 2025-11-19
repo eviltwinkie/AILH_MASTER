@@ -32,7 +32,7 @@ CLI:
 import os
 
 # Config for output file
-OUTPUT_FILE = os.environ.get("GPU_DIAG_OUTPUT", "DOCS/test_gpu_cuda_results.txt")
+OUTPUT_FILE = os.environ.get("GPU_DIAG_OUTPUT", "../DOCS/test_gpu_cuda_results.txt")
 
 # Smoke testing configuration
 ENABLE_SMOKE_TESTS = os.environ.get("GPU_SMOKE_TESTS", "1").lower() in ("1", "true", "yes", "on")

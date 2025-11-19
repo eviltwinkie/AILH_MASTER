@@ -18,6 +18,7 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0" 
 os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
 os.environ["CUDA_MODULE_LOADING"] = "EAGER"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # Less aggressive optimization settings to prevent cuDNN issues
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_cpu_global_jit=false --tf_xla_auto_jit=0"
@@ -40,7 +41,7 @@ DATA_SENSORS = os.path.join(ROOT_DIR, "DATA_SENSORS")
 
 # Dataset directories (derived from MASTER_DATASET)
 MASTER_DATASET = os.path.join(DATA_STORE, "MASTER_DATASET")      # ⭐ Source of truth
-DATASET_TRAINING = os.path.join(DATA_STORE, "DATASET_TRAINING")  # 70% of MASTER_DATASET
+DATASET_TRAINING = os.path.join(DATA_STORE, "MASTER_DATASET")  # 70% of MASTER_DATASET
 DATASET_VALIDATION = os.path.join(DATA_STORE, "DATASET_VALIDATION")  # 20% of MASTER_DATASET
 DATASET_TESTING = os.path.join(DATA_STORE, "DATASET_TESTING")    # 10% of MASTER_DATASET
 DATASET_LEARNING = os.path.join(DATA_STORE, "DATASET_LEARNING")  # Incremental learning data
@@ -91,8 +92,8 @@ CPU_COUNT = os.cpu_count() or 1
 
 DRIVE_BUFFERSIZE = 131072
 PREFETCH_THREADS = 6
-PREFETCH_DEPTH = 16
-FILES_PER_TASK = 768
+FILES_PER_TASK = 740
+RAM_QUEUE_SIZE = 128
 
 DELIMITER = '~'
 DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
