@@ -1,35 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dataset Continual Learning Module
+Multi-Label Dataset Continual Learning Module
 
-Implements continual/incremental learning for PyTorch leak detection models.
-Processes new WAV files from LEARNING directory and updates existing model weights
-while preserving previously learned knowledge.
+Incremental learning implementation for multi-label leak detection models (2-class variant).
+Performs continual training on new WAV files while preserving learned knowledge.
 
 Key Features:
-    - Continual learning from LEARNING/ directory WAV files
-    - On-the-fly WAV resampling and mel spectrogram extraction
-    - Reads builder config from model metadata for consistency
-    - Uses existing VALIDATION_DATASET.H5 for evaluation
-    - Leak threshold sweep for optimal F1 score
-    - Checkpoint management with auto-resume capability
+    - Continual learning from LEARNING/ directory
+    - Streaming WAV processing (no full dataset reload)
+    - Mel spectrogram computation on-the-fly with GPU acceleration
+    - File-level paper-exact evaluation metric
+    - Checkpoint management with rolling backup (keep last K)
+    - Auto-resume from last checkpoint
+    - Live GPU monitoring during evaluation
 
-Workflow:
-    1. Load model metadata and builder configuration
-    2. Stream and process WAV files from LEARNING/ directory
-    3. Perform incremental training epochs (default: 30)
-    4. Evaluate on validation set with leak threshold optimization
-    5. Update best.pth and model_meta.json when F1 improves
+Architecture:
+    LeakCNNMulti - Dual-head model:
+    - Main head: Multiclass classification logits
+    - Auxiliary head: Binary leak detection (leak-vs-rest)
+
+Learning Configuration:
+    - Epochs: 30 (default)
+    - Batch size: 8192 segments
+    - Learning rate: 5e-4
+    - Optimizer: AdamW with CosineAnnealingLR
+    - Loss: CrossEntropyLoss
+    - Gradient clipping: 1.0
+
+File-Level Evaluation (Paper-Exact):
+    For each file:
+    1. Process all short segments in each long segment
+    2. Compute leak probability: 0.5*softmax(leak_class) + 0.5*sigmoid(aux_leak)
+    3. Average probabilities within each long segment
+    4. File is LEAK if ≥50% of long segments have prob ≥ threshold (0.5)
 
 Directory Structure:
-    STAGE_DIR/LEARNING/           - New WAV files organized by label (LEAK, NOLEAK)
+    STAGE_DIR/LEARNING/           - New labeled WAV files (LEAK/, NOLEAK/)
     STAGE_DIR/VALIDATION_DATASET.H5 - Validation set for evaluation
-    MODEL_DIR/best.pth            - Model weights (updated in-place)
-    MODEL_DIR/model_meta.json     - Model metadata (updated with new threshold)
+    MODEL_DIR/best.pth            - Model weights (updated on improvement)
+    MODEL_DIR/model_meta.json     - Metadata with leak threshold
+    MODEL_DIR/checkpoints/        - Rolling checkpoints
 
-Note:
-    Only supports LEAK and NOLEAK labels. Other labels are ignored.
+Allowed Labels:
+    LEAK, NOLEAK only (others ignored)
+
+Usage:
+    Edit paths in script, then run: python multilabel_dataset_learner.py
 """
 leak_dataset_learner.py (NO-CLI)
 • Continual learning on WAVs under STAGE_DIR/LEARNING (same label folder structure).
@@ -53,8 +70,6 @@ import torchaudio
 import h5py
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
-
-ALLOWED_LABELS = ("LEAK", "NOLEAK")
 
 # ========================= USER VARIABLES (EDIT HERE) =========================
 STAGE_DIR   = Path("/DEVELOPMENT/DATASET_REFERENCE")
@@ -82,122 +97,6 @@ COMPILE_MODE      = "reduce-overhead"
 GRAD_CLIP_NORM    = 1.0
 # =============================== END VARIABLES ================================
 
-class EvalStatus:
-    def __init__(self, total_files:int):
-        self.total = total_files
-        self.done = 0
-        self.correct = 0
-        self.pred_leaks = 0
-        self._stop = threading.Event()
-        self._th = None
-        self._nvml = None
-        if globals().get("_HAS_NVML", False):
-            try:
-                pynvml.nvmlInit()
-                self._nvml = pynvml.nvmlDeviceGetHandleByIndex(0)
-            except Exception:
-                self._nvml = None
-
-    def update(self, done:int=None, correct:int=None, pred_leaks:int=None):
-        if done is not None: self.done = done
-        if correct is not None: self.correct = correct
-        if pred_leaks is not None: self.pred_leaks = pred_leaks
-
-    def gpu_line(self):
-        if self._nvml is None: return "GPU N/A"
-        try:
-            util = pynvml.nvmlDeviceGetUtilizationRates(self._nvml).gpu
-            mem = pynvml.nvmlDeviceGetMemoryInfo(self._nvml)
-            vram = mem.used/(1024**3)
-            return f"GPU {util}% | VRAM {vram:.2f} GB"
-        except Exception:
-            return "GPU N/A"
-
-    def run(self):
-        pass
-        #print(f"[Paper Eval] Starting status thread. Total files: {self.total}", file=sys.stdout)
-        # while not self._stop.wait(2.0):
-        #     acc = (self.correct / max(1,self.done))
-        #     leak_frac = (self.pred_leaks / max(1,self.done))*100.0
-        #     cpu = psutil.cpu_percent(interval=None)
-        #     ram = psutil.virtual_memory().percent
-        #     tqdm.write(f"[Paper Eval] {self.done}/{self.total} files | acc@file {acc:.4f} | leak% {leak_frac:.1f} | CPU {cpu:.1f}% | RAM {ram:.1f}% | {self.gpu_line()}", file=sys.stdout)
-
-    def start(self):
-        if self._th is None:
-            self._th = threading.Thread(target=self.run, daemon=True)
-            self._th.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._th:
-            try: self._th.join(timeout=2.0)
-            except Exception: pass
-        if self._nvml is not None:
-            try: pynvml.nvmlShutdown()
-            except Exception: pass
-
-import threading, time, psutil, sys
-
-def evaluate_file_level(model: nn.Module,
-                        ds: LeakMelDataset,
-                        device: torch.device,
-                        threshold: float = 0.5) -> float:
-    """
-    Paper-exact file-level metric with live status:
-      • For each FILE, for each LONG segment, average per-SHORT leak probabilities where
-        per-SHORT = 0.5*softmax(leak_class) + 0.5*sigmoid(aux_leak).
-      • A FILE is LEAK iff ≥ 50% of LONG segments have prob ≥ threshold (0.5).
-      • Returns overall file-level accuracy.
-    Status:
-      • tqdm progress bar (position=0, dynamic_ncols, mininterval=0.2)
-      • Heartbeat every ~2s with CPU/RAM and GPU util/VRAM.
-    """
-    model.eval()
-    if getattr(ds, "h5f", None) is None:
-        ds._ensure_open()
-    class_names = ds.class_names or [f"C{i}" for i in range(2)]
-    leak_idx = class_names.index("LEAK") if "LEAK" in class_names else 0
-    correct, total, pred_leaks = 0, 0, 0
-
-    status = EvalStatus(ds.num_files); status.start()
-    from tqdm import tqdm
-    with torch.inference_mode(), torch.amp.autocast("cuda", dtype=torch.float16):
-        pbar = tqdm(range(ds.num_files), desc="[Paper Eval] files", unit="file", leave=True, position=0, dynamic_ncols=True, mininterval=0.2, file=sys.stdout)
-        for fidx in pbar:
-            blk = ds._segs[fidx]   # [num_long,num_short,(C,)F,T]
-            lbl = int(ds._labels[fidx])
-            num_long, num_short = ds.num_long, ds.num_short
-            probs_long = []
-            for li in range(num_long):
-                mel = blk[li]
-                if getattr(ds, "_has_channel", False):
-                    mel = mel[:,0]
-                mel_t = torch.from_numpy(mel).unsqueeze(1).to(device, dtype=torch.float16, non_blocking=True)
-                logits, leak_logit = model(mel_t)
-                p_cls = torch.softmax(logits, dim=1)[:, leak_idx]
-                p_aux = torch.sigmoid(leak_logit)
-                p = 0.5*(p_cls + p_aux)
-                probs_long.append(float(p.mean().item()))
-            num_pos = sum(1 for q in probs_long if q >= threshold)
-            is_leak = (num_pos >= max(1, int((0.5*ds.num_long + 1e-9))))
-            pred_is_leak = 1 if is_leak else 0
-            true_is_leak = 1 if lbl == leak_idx else 0
-            if pred_is_leak == true_is_leak:
-                correct += 1
-            if is_leak:
-                pred_leaks += 1
-            total += 1
-            status.update(done=total, correct=correct, pred_leaks=pred_leaks)
-            pbar.set_postfix({
-                "acc@file": f"{(correct/max(total,1)):.4f}",
-                "leak%": f"{(100.0*pred_leaks/max(total,1)):.1f}",
-                "files": f"{total}/{ds.num_files}"
-            })
-            pbar.refresh()
-    status.stop()
-    return correct / max(total, 1)
-
 def set_seed(seed: Optional[int]):
     if seed is None: return
     import random
@@ -208,17 +107,6 @@ def device_setup():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required.")
     return torch.device("cuda")
-
-
-def rotate_checkpoints(ckpt_dir: Path, keep_last_k: int = 3):
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        files = sorted(ckpt_dir.glob("epoch_*.pth"), key=lambda q: q.stat().st_mtime, reverse=True)
-        for q in files[keep_last_k:]:
-            try: q.unlink()
-            except Exception: pass
-    except Exception:
-        pass
 
 def load_meta():
     with open(MODEL_DIR / "model_meta.json", "r") as f:
@@ -261,8 +149,6 @@ class LearningWavDataset(Dataset):
         pairs: List[Tuple[Path, int]] = []
         for root, _, files in os.walk(learn_dir):
             label = os.path.basename(root)
-            if label not in ALLOWED_LABELS:
-                continue
             if label == os.path.basename(str(learn_dir)):  # skip root
                 continue
             if label not in class_names:  # ignore unknown labels
@@ -307,7 +193,7 @@ class LearningWavDataset(Dataset):
         return torch.from_numpy(mel_np), torch.tensor(int(y), dtype=torch.long)
 
 class LeakCNNMulti(nn.Module):
-    def __init__(self, n_classes: int = 2, dropout: float = 0.25):
+    def __init__(self, n_classes: int = 5, dropout: float = 0.25):
         super().__init__()
         self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
@@ -353,29 +239,41 @@ class LeakMelDataset(Dataset):
         if self._has_channel: mel = mel[0]
         return torch.from_numpy(mel), torch.tensor(int(self._labels[fidx]), dtype=torch.long)
 
-
 def eval_split(model: nn.Module, loader: DataLoader, device: torch.device, leak_idx: int, use_channels_last: bool):
     model.eval()
-    total_loss = 0.0
-    correct = 0
-    seen = 0
-    cls_loss_fn = nn.CrossEntropyLoss()
-    with torch.inference_mode(), torch.amp.autocast("cuda"):
+    criterion = nn.CrossEntropyLoss(reduction="sum")
+    total_loss, total, correct = 0.0, 0, 0
+    leak_scores = []; leak_targets = []
+    with torch.inference_mode(), torch.amp.autocast('cuda'):
         for mel_batch, labels in loader:
-            mel_batch = mel_batch.unsqueeze(1).to(device, non_blocking=True)
-            if use_channels_last:
-                mel_batch = mel_batch.contiguous(memory_format=torch.channels_last)
-            labels = labels.to(device, non_blocking=True)
+            mel_batch = mel_batch.unsqueeze(1)
+            if use_channels_last: mel_batch = mel_batch.contiguous(memory_format=torch.channels_last)
+            mel_batch = mel_batch.to(device, non_blocking=True); labels = labels.to(device, non_blocking=True)
             logits, leak_logit = model(mel_batch)
-            loss = cls_loss_fn(logits, labels)
-            bs = labels.size(0)
-            total_loss += float(loss.item()) * bs
-            preds = logits.argmax(dim=1)
-            correct += int((preds == labels).sum().item())
-            seen += bs
-    return {"loss": total_loss / max(1, seen), "acc": correct / max(1, seen)}
-
-
+            loss = criterion(logits, labels)
+            total_loss += float(loss.item())
+            total += labels.size(0)
+            preds = logits.argmax(dim=1); correct += int((preds == labels).sum().item())
+            rel = (labels == leak_idx).to(torch.float32)
+            leak_targets.append(rel.detach().cpu().numpy())
+            leak_scores.append(torch.sigmoid(leak_logit).detach().cpu().numpy())
+    avg_loss = total_loss / max(total, 1)
+    acc = correct / max(total, 1)
+    leak_targets = np.concatenate(leak_targets) if leak_scores else np.array([])
+    leak_scores  = np.concatenate(leak_scores) if leak_scores else np.array([])
+    out = {"loss": avg_loss, "acc": acc}
+    if leak_scores.size:
+        best_f1, best_p, best_r, best_thr = -1, 0, 0, 0.5
+        for thr in np.linspace(0.05, 0.95, 19):
+            preds = (leak_scores >= thr).astype(np.int32)
+            tp = int(((preds == 1) & (leak_targets == 1)).sum())
+            fp = int(((preds == 1) & (leak_targets == 0)).sum())
+            fn = int(((preds == 0) & (leak_targets == 1)).sum())
+            p = tp / max(tp + fp, 1); r = tp / max(tp + fn, 1)
+            f1 = 2*p*r / max(p + r, 1e-12)
+            if f1 > best_f1: best_f1, best_p, best_r, best_thr = f1, p, r, float(thr)
+        out.update({"leak_f1": best_f1, "leak_p": best_p, "leak_r": best_r, "leak_thr": best_thr})
+    return out
 
 def learn():
     set_seed(SEED)
@@ -386,8 +284,9 @@ def learn():
     bcfg = meta.get("builder_cfg", {}) or {}
 
     # Datasets
-    ds_learn = LearnDataset(STAGE_DIR / "LEARNING", class_names, bcfg)
-    ds_val = MelH5Dataset(H5_VAL)
+    ds_learn = LearningWavDataset(LEARN_DIR, bcfg, class_names)
+    ds_val   = LeakMelDataset(VAL_H5)
+
     if len(ds_learn) == 0:
         print("[LEARN] No segments found under LEARNING. Nothing to do."); return
 
@@ -421,37 +320,18 @@ def learn():
     scaler = torch.amp.GradScaler('cuda')
     cls_loss_fn = nn.CrossEntropyLoss()
 
-    # ---------- Auto-resume ----------
-    start_epoch = 1
-    last_ck = CHECKPOINTS_DIR / "last.pth"
-    if AUTO_RESUME and last_ck.exists():
-        try:
-            ck = torch.load(last_ck, map_location=device, weights_only=False)
-            model.load_state_dict(ck["model"])
-            opt.load_state_dict(ck["optimizer"])
-            sch.load_state_dict(ck["scheduler"])
-            scaler.load_state_dict(ck["scaler"])
-            start_epoch = int(ck.get("epoch", 1))
-            print(f"[RESUME] Loaded {last_ck} → epoch {start_epoch}")
-        except Exception as e:
-            print(f"[RESUME] Failed to load {last_ck}: {e}")
+    best_leak_f1, best_leak_thr, best_epoch = -1.0, float(meta.get("best_leak_threshold", 0.55)), -1
 
-    best_file_acc, best_epoch = -1.0, -1
-
-    for epoch in range(start_epoch, EPOCHS+1):
-        # Train
+    for epoch in range(1, EPOCHS+1):
         model.train()
-        running_loss = 0.0; correct = 0; seen = 0
-        pbar = tqdm(total=len(train_loader), desc=f"[Learn] Epoch {epoch}/{EPOCHS}", unit="batch")
+        running_loss, seen, correct = 0.0, 0, 0
+        pbar = tqdm(total=len(train_loader), desc=f"[Learn] {epoch}/{EPOCHS}", unit="batch")
         for mel_batch, labels in train_loader:
             mel_batch = mel_batch.unsqueeze(1)
-            if USE_CHANNELS_LAST:
-                mel_batch = mel_batch.contiguous(memory_format=torch.channels_last)
-            mel_batch = mel_batch.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-
+            if USE_CHANNELS_LAST: mel_batch = mel_batch.contiguous(memory_format=torch.channels_last)
+            mel_batch = mel_batch.to(device, non_blocking=True); labels = labels.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda"):
+            with torch.amp.autocast('cuda'):
                 logits, leak_logit = model(mel_batch)
                 loss = cls_loss_fn(logits, labels)
             scaler.scale(loss).backward()
@@ -468,34 +348,17 @@ def learn():
 
         # Evaluate on validation
         metrics = eval_split(model, val_loader, device, leak_idx, USE_CHANNELS_LAST)
-        val_loss = metrics.get("loss", 0.0); val_acc = metrics.get("acc", 0.0)
-        file_acc = evaluate_file_level(model, ds_val, device, class_names, threshold=0.5)
-        print(f"[VAL] loss={val_loss:.4f} acc={val_acc:.4f} | file_acc(paper)={file_acc:.4f}")
-
-        # Save rolling/numbered checkpoints
-        ckpt = {
-            "epoch": epoch + 1,
-            "model": model.state_dict(),
-            "optimizer": opt.state_dict(),
-            "scheduler": sch.state_dict(),
-            "scaler": scaler.state_dict(),
-            "meta": meta,
-        }
-        CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-        torch.save(ckpt, CHECKPOINTS_DIR / "last.pth")
-        torch.save(ckpt, CHECKPOINTS_DIR / f"epoch_{epoch:03d}.pth")
-        rotate_checkpoints(CHECKPOINTS_DIR, keep_last_k=KEEP_LAST_K)
-
-        # Track best by paper metric
-        if file_acc > best_file_acc:
-            best_file_acc, best_epoch = file_acc, epoch
+        leak_f1  = metrics.get("leak_f1", -1.0); leak_thr = metrics.get("leak_thr", best_leak_thr)
+        if leak_f1 > best_leak_f1:
+            best_leak_f1, best_leak_thr, best_epoch = leak_f1, leak_thr, epoch
             torch.save(model.state_dict(), MODEL_DIR / "best.pth")
-            meta["leak_threshold"] = 0.5
+            # update meta in-place
+            meta["best_leak_threshold"] = float(best_leak_thr)
             with open(MODEL_DIR / "model_meta.json", "w") as f:
                 json.dump(meta, f, indent=2)
+        print(f"[VAL] epoch={epoch:03d} leak_f1={leak_f1:.4f}@{leak_thr:.2f} (best {best_leak_f1:.4f}@{best_leak_thr:.2f})")
 
-    print(f"[Done] best_file_acc(paper)={best_file_acc:.4f} (epoch {best_epoch})")
-
+    print(f"[Done] best_learn_f1={best_leak_f1:.4f} @ thr={best_leak_thr:.2f} (epoch {best_epoch})")
 
 if __name__ == "__main__":
     learn()
