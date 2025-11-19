@@ -1266,6 +1266,8 @@ def setup_loss_functions(
             inv = (total_segs / counts_binary)
             inv = inv / inv.mean()
             class_weights_t = torch.tensor(inv, dtype=torch.float32, device=device)
+            logger.info("Binary class weights: NOLEAK=%.4f, LEAK=%.4f (from %d NOLEAK segs, %d LEAK segs)",
+                       inv[0], inv[1], noleak_segs, leak_segs)
         else:
             # Multi-class mode: compute weights for all classes
             counts = class_counts_from_labels(ds_tr)
