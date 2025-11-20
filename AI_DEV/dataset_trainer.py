@@ -396,6 +396,7 @@ class Config:
     prefetch_factor: int = 24           # Batches to prefetch per worker (extreme prefetch)
     persistent_workers: bool = True     # Keep workers alive between epochs
     pin_memory: bool = True             # Pin memory for faster GPU transfer
+    preload_to_ram: bool = True         # Preload entire dataset to RAM (requires ~8GB, eliminates I/O)
 
     # ========== DATA AUGMENTATION ==========
     use_specaugment: bool = False       # Enable SpecAugment (requires torchaudio)
@@ -981,11 +982,15 @@ class LeakMelDataset(Dataset):
     Labels are file-level but returned per-segment for training convenience.
     File-level evaluation (evaluate_file_level) aggregates predictions back to files.
     """
-    def __init__(self, h5_path: Path, cache_files: int = 256):
+    def __init__(self, h5_path: Path, cache_files: int = 1024, preload_to_ram: bool = False):
         self.h5_path = str(h5_path)
         self.h5f = None
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._cache_files = cache_files
+        self._preloaded = False
+        self._preloaded_segs = None
+        self._preloaded_labels = None
+        
         with h5py.File(self.h5_path, "r") as f:  # type: ignore[misc]
             segs = f[HDF5_SEGMENTS_KEY]; shp = tuple(segs.shape)  # type: ignore[union-attr]
             if len(shp) == 5:
@@ -1009,6 +1014,20 @@ class LeakMelDataset(Dataset):
                 if isinstance(cj, (bytes, bytearray)): cj = cj.decode("utf-8")
                 if cj: self.builder_cfg = json.loads(cj)
             except Exception: pass
+            
+            # Preload entire dataset to RAM if requested
+            if preload_to_ram:
+                logger.info("Preloading dataset to RAM...")
+                import time
+                start = time.time()
+                self._preloaded_segs = segs[:]  # type: ignore[index] # Load entire array to RAM
+                self._preloaded_labels = f[HDF5_LABELS_KEY][:]  # type: ignore[index] # Load labels
+                elapsed = time.time() - start
+                size_gb = self._preloaded_segs.nbytes / (1024**3)  # type: ignore[union-attr]
+                logger.info("✓ Preloaded %.2f GB to RAM in %.1fs (%.0f MB/s)", 
+                           size_gb, elapsed, (size_gb * 1024) / elapsed)
+                self._preloaded = True
+        
         self.total_segments = self.num_files * self.num_long * self.num_short
 
     @property
@@ -1017,7 +1036,14 @@ class LeakMelDataset(Dataset):
 
     def _ensure_open(self):
         if self.h5f is None:
-            self.h5f = h5py.File(self.h5_path, "r", libver="latest", swmr=True)  # type: ignore[misc]
+            # Open with larger chunk cache for better read performance
+            # Use rdcc_nbytes=50MB (default is 1MB) to cache more file blocks
+            self.h5f = h5py.File(
+                self.h5_path, "r", 
+                libver="latest",
+                rdcc_nbytes=50 * 1024 * 1024,  # 50MB chunk cache
+                rdcc_nslots=5003  # Prime number for better hash distribution
+            )  # type: ignore[misc]
             self._segs = self.h5f[HDF5_SEGMENTS_KEY]  # type: ignore[misc]
             self._labels = self.h5f[HDF5_LABELS_KEY]  # type: ignore[misc]
 
@@ -1037,12 +1063,22 @@ class LeakMelDataset(Dataset):
     def __len__(self): return self.total_segments
 
     def __getitem__(self, index: int):
-        self._ensure_open()
         LxS = self.num_long * self.num_short
         fidx = index // LxS
         rem  = index %  LxS
         li   = rem // self.num_short
         si   = rem %  self.num_short
+        
+        # Use preloaded RAM data if available (ZERO I/O latency)
+        if self._preloaded:
+            mel = self._preloaded_segs[fidx, li, si]  # type: ignore[index]
+            if self._has_channel: mel = mel[0]  # type: ignore[index]
+            mel_t = torch.from_numpy(mel)  # zero-copy view
+            lbl_t = torch.tensor(int(self._preloaded_labels[fidx]), dtype=torch.long)  # type: ignore[index,arg-type]
+            return mel_t, lbl_t
+        
+        # Fall back to HDF5 I/O with caching
+        self._ensure_open()
         blk = self._get_file_block(fidx)  # [num_long,num_short,(C,)n_mels,t_frames]
         mel = blk[li, si]
         if self._has_channel: mel = mel[0]
@@ -2143,13 +2179,13 @@ def setup_datasets(cfg: Config) -> Tuple[LeakMelDataset, LeakMelDataset, List[st
     logger.info("="*80)
     
     logger.info("Loading training dataset: %s", cfg.train_h5)
-    train_ds = LeakMelDataset(cfg.train_h5)
+    train_ds = LeakMelDataset(cfg.train_h5, preload_to_ram=cfg.preload_to_ram)
     logger.info("  Files: %d, Segments: %d (long=%d, short=%d per long)",
                train_ds.num_files, train_ds.total_segments, train_ds.num_long, train_ds.num_short)
     logger.info("  Mel shape: [%d, %d] (n_mels × t_frames)", train_ds.n_mels, train_ds.t_frames)
     
     logger.info("Loading validation dataset: %s", cfg.val_h5)
-    val_ds = LeakMelDataset(cfg.val_h5)
+    val_ds = LeakMelDataset(cfg.val_h5, preload_to_ram=cfg.preload_to_ram)
     logger.info("  Files: %d, Segments: %d", val_ds.num_files, val_ds.total_segments)
     
     original_class_names = train_ds.class_names or [f"C{i}" for i in range(cfg.num_classes)]

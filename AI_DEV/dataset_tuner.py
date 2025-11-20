@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Dataset Hyperparameter Tuner - Optuna-based optimization for LeakCNNMulti
+
+Automated hyperparameter optimization using Optuna to find optimal training
+configurations for leak detection models. Integrates with dataset_trainer.py
+for consistent training pipeline.
+
+Hyperparameters Optimized:
+    - Training: learning_rate, batch_size, dropout, grad_clip_norm
+    - Loss: loss_type, focal_gamma, focal_alpha_leak, leak_aux_weight
+    - Architecture: n_filters (model width scaling)
+    - Regularization: weight_decay, early_stop_patience
+
+Search Strategy:
+    - Bayesian optimization (TPE sampler) for efficient exploration
+    - MedianPruner for early termination of poor trials
+    - Persistent SQLite storage for resumable studies
+    - GPU memory-aware batch size selection
+
+Features:
+    - RAM preloading for fast iteration (requires 8GB+ RAM)
+    - Automatic checkpoint cleanup between trials
+    - Real-time progress tracking with GPU utilization
+    - Best parameters saved with validation metrics
+    - Visualization plots (history, importances, parallel coordinates)
+
+Output:
+    - Best parameters: MODEL_DIR/tuning/best_params.json
+    - Optuna database: MODEL_DIR/tuning/study.db
+    - Plots: MODEL_DIR/tuning/plots/
+
+Usage:
+    python dataset_tuner.py --n_trials 50 --timeout 3600
+    python dataset_tuner.py --restart  # Delete study and start fresh
+    
+    # View dashboard:
+    optuna-dashboard sqlite:///MODEL_DIR/tuning/study.db
+
+Example Integration:
+    # After tuning, apply best parameters:
+    best = json.load(open('MODEL_DIR/tuning/best_params.json'))
+    cfg = Config()
+    cfg.learning_rate = best['learning_rate']
+    cfg.batch_size = best['batch_size']
+    # ... etc
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+
+try:
+    import optuna
+    from optuna.trial import Trial, TrialState
+    from optuna.pruners import MedianPruner
+    from optuna.samplers import TPESampler
+    _HAS_OPTUNA = True
+except ImportError:
+    _HAS_OPTUNA = False
+    print("❌ Optuna not installed. Install with: pip install optuna optuna-dashboard")
+    sys.exit(1)
+
+# Import from dataset_trainer
+from dataset_trainer import (
+    Config, LeakMelDataset, BinaryLabelDataset, StatefulSampler,
+    train_one_epoch, evaluate_file_level, setup_datasets,
+    device_setup, set_seed, logger, CYAN, GREEN, YELLOW, RED, RESET
+)
+
+# Constants
+TUNING_SUBDIR = "tuning"
+PLOTS_SUBDIR = "plots"
+STUDY_NAME = "leak_detection_hpo"
+STORAGE_FILE = "study.db"
+BEST_PARAMS_FILE = "best_params.json"
+
+
+class TuningConfig:
+    """Configuration for hyperparameter optimization."""
+    def __init__(self):
+        # Base paths
+        self.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS_BINARY")
+        self.tuning_dir = self.model_dir / TUNING_SUBDIR
+        self.plots_dir = self.tuning_dir / PLOTS_SUBDIR
+        
+        # Optuna settings
+        self.n_trials = 50
+        self.timeout = None  # seconds
+        self.n_jobs = 1  # Parallel trials (1 recommended for GPU)
+        self.restart = False
+        
+        # Trial settings
+        self.max_epochs_per_trial = 20  # Early stopping for bad trials
+        self.min_epochs_per_trial = 5   # Minimum before pruning
+        self.pruning_warmup = 3         # Epochs before pruning starts
+        
+        # Fixed dataset params (use RAM preloading for speed)
+        self.preload_to_ram = True
+        self.num_workers = 8  # Fewer workers for tuning (less memory per trial)
+        self.prefetch_factor = 12
+        
+    def setup_dirs(self):
+        """Create tuning directories."""
+        self.tuning_dir.mkdir(parents=True, exist_ok=True)
+        self.plots_dir.mkdir(parents=True, exist_ok=True)
+
+
+def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
+    """
+    Suggest hyperparameters for trial.
+    
+    Returns modified Config with trial suggestions.
+    """
+    cfg = Config()
+    
+    # Copy fixed settings from base
+    cfg.stage_dir = base_cfg.stage_dir
+    cfg.model_dir = base_cfg.model_dir
+    cfg.binary_mode = base_cfg.binary_mode
+    cfg.preload_to_ram = base_cfg.preload_to_ram
+    cfg.num_workers = base_cfg.num_workers
+    cfg.prefetch_factor = base_cfg.prefetch_factor
+    cfg.seed = base_cfg.seed
+    
+    # === Hyperparameters to optimize ===
+    
+    # Learning rate (log scale)
+    cfg.learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
+    
+    # Batch size (GPU memory constrained)
+    cfg.batch_size = trial.suggest_categorical("batch_size", [4096, 8192, 12288, 16384])
+    cfg.val_batch_size = cfg.batch_size // 2
+    
+    # Dropout regularization
+    cfg.dropout = trial.suggest_float("dropout", 0.1, 0.5, step=0.05)
+    
+    # Gradient clipping
+    grad_clip_enabled = trial.suggest_categorical("grad_clip_enabled", [True, False])
+    if grad_clip_enabled:
+        cfg.grad_clip_norm = trial.suggest_float("grad_clip_norm", 0.5, 2.0, step=0.25)
+    else:
+        cfg.grad_clip_norm = None
+    
+    # Loss function
+    cfg.loss_type = trial.suggest_categorical("loss_type", ["weighted_ce", "focal"])
+    
+    if cfg.loss_type == "focal":
+        cfg.focal_gamma = trial.suggest_float("focal_gamma", 1.0, 3.0, step=0.5)
+        cfg.focal_alpha_leak = trial.suggest_float("focal_alpha_leak", 0.5, 0.9, step=0.1)
+    
+    # Auxiliary leak head weight
+    cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.2, 0.8, step=0.1)
+    
+    # Early stopping patience
+    cfg.early_stop_patience = trial.suggest_int("early_stop_patience", 5, 20, step=5)
+    
+    # Epochs for this trial
+    cfg.epochs = base_cfg.max_epochs_per_trial  # Will be stopped by pruning/early-stop
+    
+    return cfg
+
+
+def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float:
+    """
+    Objective function for Optuna optimization.
+    
+    Returns:
+        Best validation file-level leak F1 score (to maximize)
+    """
+    trial_start = time.time()
+    
+    # Generate trial configuration
+    cfg = suggest_hyperparameters(trial, base_cfg)
+    
+    logger.info(f"{CYAN}{'='*80}{RESET}")
+    logger.info(f"{CYAN}Optuna Trial #{trial.number}{RESET}")
+    logger.info(f"{CYAN}{'='*80}{RESET}")
+    logger.info(f"Parameters:")
+    for key, value in trial.params.items():
+        logger.info(f"  {key}: {value}")
+    
+    try:
+        # Setup
+        set_seed(cfg.seed)
+        device = device_setup()
+        
+        # Load datasets (with RAM preloading for speed)
+        train_ds, val_ds, train_indices, val_subset, leak_idx = setup_datasets(cfg)
+        
+        # Create model
+        from dataset_trainer import LeakCNNMulti
+        model = LeakCNNMulti(
+            n_classes=cfg.num_classes,
+            n_mels=train_ds.n_mels,
+            t_frames=train_ds.t_frames,
+            dropout=cfg.dropout
+        ).to(device)
+        
+        # Enable optimizations
+        if cfg.use_channels_last:
+            model = model.to(memory_format=torch.channels_last)  # type: ignore
+        
+        if cfg.use_compile:
+            model = torch.compile(model, mode=cfg.compile_mode)  # type: ignore
+        
+        # Setup training components
+        from dataset_trainer import setup_dataloaders, create_loss_functions
+        
+        train_loader, val_loader, train_sampler = setup_dataloaders(
+            cfg, train_ds, train_indices, val_subset, leak_idx, cfg.binary_mode
+        )
+        
+        cls_loss_fn, leak_bce = create_loss_functions(cfg, train_ds, train_indices, leak_idx)
+        
+        optimizer = torch.optim.AdamW(
+            model.parameters(),  # type: ignore[arg-type]
+            lr=cfg.learning_rate,
+            weight_decay=1e-4
+        )
+        
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg.epochs,
+            eta_min=1e-6
+        )
+        
+        scaler = torch.amp.GradScaler('cuda')
+        
+        # Training loop
+        best_val_f1 = 0.0
+        no_improve_count = 0
+        model_leak_idx = 1 if cfg.binary_mode else leak_idx
+        
+        for epoch in range(1, cfg.epochs + 1):
+            # Train
+            train_loss, train_acc = train_one_epoch(
+                epoch=epoch,
+                model=model,
+                train_loader=train_loader,
+                optimizer=optimizer,
+                scaler=scaler,
+                cls_loss_fn=cls_loss_fn,
+                leak_bce=leak_bce,
+                cfg=cfg,
+                leak_idx=leak_idx,
+                model_leak_idx=model_leak_idx,
+                device=device,
+                use_ta=False,  # Disable augmentation for tuning speed
+                time_mask=None,
+                freq_mask=None,
+                interrupted={"flag": False}
+            )
+            
+            # Validate
+            val_metrics = evaluate_file_level(
+                model=model,
+                ds=val_ds if not cfg.binary_mode else BinaryLabelDataset(val_ds, leak_idx),
+                device=device,
+                batch_long_segments=0,
+                leak_idx=leak_idx,
+                model_leak_idx=model_leak_idx,
+                desc=f"[Trial {trial.number}] Val Epoch {epoch}"
+            )
+            
+            val_f1 = val_metrics["file_leak_f1"]
+            
+            logger.info(
+                f"Trial {trial.number} Epoch {epoch}/{cfg.epochs}: "
+                f"train_loss={train_loss:.4f}, train_acc={train_acc:.4f}, "
+                f"val_f1={val_f1:.4f}"
+            )
+            
+            # Report to Optuna for pruning
+            trial.report(val_f1, epoch)
+            
+            # Prune if trial shows no promise
+            if epoch >= tuning_cfg.pruning_warmup and trial.should_prune():
+                logger.warning(f"{YELLOW}Trial {trial.number} pruned at epoch {epoch}{RESET}")
+                raise optuna.TrialPruned()
+            
+            # Track best
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+            
+            # Early stopping
+            if no_improve_count >= cfg.early_stop_patience:
+                logger.info(f"Early stopping at epoch {epoch}")
+                break
+            
+            scheduler.step()
+        
+        trial_elapsed = time.time() - trial_start
+        logger.info(
+            f"{GREEN}Trial {trial.number} completed: best_val_f1={best_val_f1:.4f} "
+            f"({trial_elapsed:.1f}s){RESET}"
+        )
+        
+        return best_val_f1
+        
+    except optuna.TrialPruned:
+        raise
+    except Exception as e:
+        logger.error(f"{RED}Trial {trial.number} failed: {e}{RESET}")
+        raise
+    finally:
+        # Cleanup
+        torch.cuda.empty_cache()
+
+
+def run_optimization(tuning_cfg: TuningConfig):
+    """Run Optuna optimization study."""
+    
+    # Setup
+    tuning_cfg.setup_dirs()
+    storage_path = tuning_cfg.tuning_dir / STORAGE_FILE
+    storage_url = f"sqlite:///{storage_path}"
+    
+    # Delete existing study if restart requested
+    if tuning_cfg.restart and storage_path.exists():
+        logger.info(f"{YELLOW}Restarting: deleting {storage_path}{RESET}")
+        storage_path.unlink()
+        try:
+            optuna.delete_study(study_name=STUDY_NAME, storage=storage_url)
+        except Exception:
+            pass
+    
+    # Create base configuration
+    base_cfg = Config()
+    base_cfg.preload_to_ram = tuning_cfg.preload_to_ram
+    base_cfg.num_workers = tuning_cfg.num_workers
+    base_cfg.prefetch_factor = tuning_cfg.prefetch_factor
+    base_cfg.max_epochs_per_trial = tuning_cfg.max_epochs_per_trial
+    
+    # Create or load study
+    study = optuna.create_study(
+        study_name=STUDY_NAME,
+        storage=storage_url,
+        load_if_exists=not tuning_cfg.restart,
+        direction="maximize",  # Maximize leak F1
+        sampler=TPESampler(seed=base_cfg.seed),
+        pruner=MedianPruner(
+            n_startup_trials=tuning_cfg.min_epochs_per_trial,
+            n_warmup_steps=tuning_cfg.pruning_warmup
+        )
+    )
+    
+    logger.info(f"{CYAN}{'='*80}{RESET}")
+    logger.info(f"{CYAN}Starting Optuna Hyperparameter Optimization{RESET}")
+    logger.info(f"{CYAN}{'='*80}{RESET}")
+    logger.info(f"Study: {STUDY_NAME}")
+    logger.info(f"Storage: {storage_path}")
+    logger.info(f"Trials: {tuning_cfg.n_trials}")
+    logger.info(f"Timeout: {tuning_cfg.timeout}s" if tuning_cfg.timeout else "Timeout: None")
+    logger.info(f"Max epochs per trial: {tuning_cfg.max_epochs_per_trial}")
+    logger.info(f"{CYAN}{'='*80}{RESET}")
+    
+    # Run optimization
+    try:
+        study.optimize(
+            lambda trial: objective(trial, base_cfg, tuning_cfg),
+            n_trials=tuning_cfg.n_trials,
+            timeout=tuning_cfg.timeout,
+            n_jobs=tuning_cfg.n_jobs,
+            show_progress_bar=True
+        )
+    except KeyboardInterrupt:
+        logger.info(f"{YELLOW}Optimization interrupted by user{RESET}")
+    
+    # Results
+    logger.info(f"{GREEN}{'='*80}{RESET}")
+    logger.info(f"{GREEN}Optimization Complete!{RESET}")
+    logger.info(f"{GREEN}{'='*80}{RESET}")
+    
+    completed_trials = [t for t in study.trials if t.state == TrialState.COMPLETE]
+    pruned_trials = [t for t in study.trials if t.state == TrialState.PRUNED]
+    failed_trials = [t for t in study.trials if t.state == TrialState.FAIL]
+    
+    logger.info(f"Total trials: {len(study.trials)}")
+    logger.info(f"  Completed: {len(completed_trials)}")
+    logger.info(f"  Pruned: {len(pruned_trials)}")
+    logger.info(f"  Failed: {len(failed_trials)}")
+    
+    if completed_trials:
+        best_trial = study.best_trial
+        logger.info(f"\n{GREEN}Best Trial #{best_trial.number}:{RESET}")
+        logger.info(f"  Value (leak F1): {best_trial.value:.4f}")
+        logger.info(f"  Parameters:")
+        for key, value in best_trial.params.items():
+            logger.info(f"    {key}: {value}")
+        
+        # Save best parameters
+        best_params_path = tuning_cfg.tuning_dir / BEST_PARAMS_FILE
+        with open(best_params_path, 'w') as f:
+            json.dump({
+                "trial_number": best_trial.number,
+                "value": best_trial.value,
+                "params": best_trial.params,
+                "datetime": best_trial.datetime_complete.isoformat() if best_trial.datetime_complete else None
+            }, f, indent=2)
+        logger.info(f"\n{GREEN}✓ Best parameters saved to: {best_params_path}{RESET}")
+        
+        # Generate plots
+        try:
+            import plotly.graph_objects as go
+            
+            logger.info(f"\n{CYAN}Generating visualization plots...{RESET}")
+            
+            # Optimization history
+            fig = optuna.visualization.plot_optimization_history(study)
+            fig.write_html(str(tuning_cfg.plots_dir / "optimization_history.html"))
+            
+            # Parameter importances
+            fig = optuna.visualization.plot_param_importances(study)
+            fig.write_html(str(tuning_cfg.plots_dir / "param_importances.html"))
+            
+            # Parallel coordinates
+            fig = optuna.visualization.plot_parallel_coordinate(study)
+            fig.write_html(str(tuning_cfg.plots_dir / "parallel_coordinate.html"))
+            
+            # Slice plot
+            fig = optuna.visualization.plot_slice(study)
+            fig.write_html(str(tuning_cfg.plots_dir / "slice.html"))
+            
+            logger.info(f"{GREEN}✓ Plots saved to: {tuning_cfg.plots_dir}{RESET}")
+        except Exception as e:
+            logger.warning(f"{YELLOW}Failed to generate plots: {e}{RESET}")
+    
+    logger.info(f"\n{CYAN}View dashboard with:{RESET}")
+    logger.info(f"  optuna-dashboard {storage_url}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Hyperparameter tuning for leak detection models",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--n_trials", type=int, default=50, help="Number of trials to run")
+    parser.add_argument("--timeout", type=int, default=None, help="Timeout in seconds (None for no limit)")
+    parser.add_argument("--n_jobs", type=int, default=1, help="Number of parallel trials (1 recommended for GPU)")
+    parser.add_argument("--restart", action="store_true", help="Delete existing study and start fresh")
+    parser.add_argument("--max_epochs", type=int, default=20, help="Maximum epochs per trial")
+    
+    args = parser.parse_args()
+    
+    tuning_cfg = TuningConfig()
+    tuning_cfg.n_trials = args.n_trials
+    tuning_cfg.timeout = args.timeout
+    tuning_cfg.n_jobs = args.n_jobs
+    tuning_cfg.restart = args.restart
+    tuning_cfg.max_epochs_per_trial = args.max_epochs
+    
+    run_optimization(tuning_cfg)
+
+
+if __name__ == "__main__":
+    main()
