@@ -161,13 +161,17 @@ def run_dataset_builder() -> bool:
         return False
 
 
-def run_train_binary(use_tuned: bool = False, fresh: bool = False) -> bool:
+def run_train_binary(use_tuned: bool = False, fresh: bool = False, continue_training: bool = False, checkpoint_path: Optional[str] = None, reset_optimizer: bool = False, reset_scheduler: bool = False) -> bool:
     """
     Train binary LEAK/NOLEAK model.
     
     Args:
         use_tuned: Whether to use tuned hyperparameters
         fresh: Whether to delete old checkpoint before starting
+        continue_training: Enable continual learning mode (load existing checkpoint)
+        checkpoint_path: Path to checkpoint for continual learning (None=auto-detect)
+        reset_optimizer: Reset optimizer state when continuing (fresh optimization)
+        reset_scheduler: Reset learning rate scheduler when continuing
     
     Returns:
         True if successful, False otherwise
@@ -187,8 +191,20 @@ def run_train_binary(use_tuned: bool = False, fresh: bool = False) -> bool:
         cfg.model_dir.mkdir(parents=True, exist_ok=True)
         (cfg.model_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         
-        # Delete old checkpoint if fresh start requested
-        if fresh:
+        # Configure continual learning if requested
+        cfg.continual_learning = continue_training
+        if continue_training:
+            cfg.continual_checkpoint = checkpoint_path
+            cfg.continual_reset_optimizer = reset_optimizer
+            cfg.continual_reset_scheduler = reset_scheduler
+            print(f"{CYAN}Continual Learning Mode: Loading from existing checkpoint{RESET}")
+            if checkpoint_path:
+                print(f"  Checkpoint: {checkpoint_path}")
+            print(f"  Reset optimizer: {reset_optimizer}")
+            print(f"  Reset scheduler: {reset_scheduler}")
+        
+        # Delete old checkpoint if fresh start requested (conflicts with continue_training)
+        if fresh and not continue_training:
             checkpoint_file = Path("leak_cnn_multi_BINARY_checkpoint.pth")
             if checkpoint_file.exists():
                 print(f"{YELLOW}Deleting old checkpoint: {checkpoint_file}{RESET}")
@@ -216,13 +232,17 @@ def run_train_binary(use_tuned: bool = False, fresh: bool = False) -> bool:
         return False
 
 
-def run_train_multi(use_tuned: bool = False, fresh: bool = False) -> bool:
+def run_train_multi(use_tuned: bool = False, fresh: bool = False, continue_training: bool = False, checkpoint_path: Optional[str] = None, reset_optimizer: bool = False, reset_scheduler: bool = False) -> bool:
     """
     Train multi-class (5-class) model.
     
     Args:
         use_tuned: Whether to use tuned hyperparameters
         fresh: Whether to delete old checkpoint before starting
+        continue_training: Enable continual learning mode (load existing checkpoint)
+        checkpoint_path: Path to checkpoint for continual learning (None=auto-detect)
+        reset_optimizer: Reset optimizer state when continuing (fresh optimization)
+        reset_scheduler: Reset learning rate scheduler when continuing
     
     Returns:
         True if successful, False otherwise
@@ -237,8 +257,20 @@ def run_train_multi(use_tuned: bool = False, fresh: bool = False) -> bool:
         cfg.binary_mode = False
         cfg.num_classes = 5
         
-        # Delete old checkpoint if fresh start requested
-        if fresh:
+        # Configure continual learning if requested
+        cfg.continual_learning = continue_training
+        if continue_training:
+            cfg.continual_checkpoint = checkpoint_path
+            cfg.continual_reset_optimizer = reset_optimizer
+            cfg.continual_reset_scheduler = reset_scheduler
+            print(f"{CYAN}Continual Learning Mode: Loading from existing checkpoint{RESET}")
+            if checkpoint_path:
+                print(f"  Checkpoint: {checkpoint_path}")
+            print(f"  Reset optimizer: {reset_optimizer}")
+            print(f"  Reset scheduler: {reset_scheduler}")
+        
+        # Delete old checkpoint if fresh start requested (conflicts with continue_training)
+        if fresh and not continue_training:
             checkpoint_file = Path("leak_cnn_multi_checkpoint.pth")
             if checkpoint_file.exists():
                 print(f"{YELLOW}Deleting old checkpoint: {checkpoint_file}{RESET}")
@@ -521,6 +553,27 @@ For detailed help on individual components:
         action='store_true',
         help='Train only multi-class (5-class) model'
     )
+    train_group.add_argument(
+        '--continue-training',
+        action='store_true',
+        help='Continue training from existing checkpoint (continual learning mode)'
+    )
+    train_group.add_argument(
+        '--checkpoint',
+        type=str,
+        metavar='PATH',
+        help='Path to checkpoint for continual learning (default: auto-detect last.pth or best_model.pth)'
+    )
+    train_group.add_argument(
+        '--reset-optimizer',
+        action='store_true',
+        help='Reset optimizer state when continuing training (fresh optimization on new data)'
+    )
+    train_group.add_argument(
+        '--reset-scheduler',
+        action='store_true',
+        help='Reset learning rate scheduler when continuing training'
+    )
     
     # Hyperparameter tuning
     tune_group = parser.add_argument_group('Hyperparameter Tuning')
@@ -629,20 +682,28 @@ For detailed help on individual components:
         # Train both models
         print_header("TRAINING BOTH MODELS")
         
-        if not run_train_binary(fresh=args.fresh):
+        if not run_train_binary(fresh=args.fresh, continue_training=args.continue_training, 
+                               checkpoint_path=args.checkpoint, reset_optimizer=args.reset_optimizer,
+                               reset_scheduler=args.reset_scheduler):
             all_success = False
             print_warning("Binary training failed, continuing with multi-class...")
         
-        if not run_train_multi(fresh=args.fresh):
+        if not run_train_multi(fresh=args.fresh, continue_training=args.continue_training,
+                              checkpoint_path=args.checkpoint, reset_optimizer=args.reset_optimizer,
+                              reset_scheduler=args.reset_scheduler):
             all_success = False
             print_warning("Multi-class training failed")
     
     elif args.train_binary_model:
-        if not run_train_binary(fresh=args.fresh):
+        if not run_train_binary(fresh=args.fresh, continue_training=args.continue_training,
+                               checkpoint_path=args.checkpoint, reset_optimizer=args.reset_optimizer,
+                               reset_scheduler=args.reset_scheduler):
             all_success = False
     
     elif args.train_multi_model:
-        if not run_train_multi(fresh=args.fresh):
+        if not run_train_multi(fresh=args.fresh, continue_training=args.continue_training,
+                              checkpoint_path=args.checkpoint, reset_optimizer=args.reset_optimizer,
+                              reset_scheduler=args.reset_scheduler):
             all_success = False
     
     # 4. Hyperparameter tuning (standalone)

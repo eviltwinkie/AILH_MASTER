@@ -42,8 +42,8 @@ File-Level Evaluation (Paper-Exact):
     4. File classified as LEAK if ≥50% of long segments have p ≥ threshold
 
 Configuration:
-    Defaults optimized for 5-class problem (LEAK, NORMAL, QUIET, RANDOM, MECHANICAL)
-    Adjust Config dataclass for 2-class (LEAK/NOLEAK) or 6-class (+UNCLASSIFIED)
+    Defaults optimized for 5-class problem (BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED)
+    Binary mode (binary_mode=True) collapses to 2-class (LEAK/NOLEAK)
 
 Dataset Requirements:
     - TRAINING_DATASET.H5   (built by dataset_builder.py)
@@ -59,6 +59,43 @@ Output Files:
 Usage:
     Edit Config dataclass paths and hyperparameters, then run:
     python dataset_trainer.py
+    
+    Or use ai_builder.py for unified pipeline:
+    python ai_builder.py --train-binary-model
+    python ai_builder.py --train-multi-model
+
+Continual Learning:
+    Continue training from existing checkpoints to add more data or extend training.
+    
+    Use Cases:
+    1. Add new training data and continue from existing model:
+       python ai_builder.py --train-binary-model --continue-training --reset-optimizer
+       
+    2. Extend training for more epochs (model converged but want more refinement):
+       python ai_builder.py --train-binary-model --continue-training
+       
+    3. Fine-tune with lower learning rate (edit Config.learning_rate first):
+       python ai_builder.py --train-binary-model --continue-training --reset-scheduler
+       
+    4. Continue from specific checkpoint:
+       python ai_builder.py --train-binary-model --continue-training --checkpoint /path/to/checkpoint.pth
+    
+    Configuration:
+    - continual_learning: bool = False           # Enable continual learning mode
+    - continual_checkpoint: Optional[str] = None # Path to checkpoint (None=auto-detect)
+    - continual_reset_scheduler: bool = False    # Reset LR scheduler (fresh schedule)
+    - continual_reset_optimizer: bool = False    # Reset optimizer (fresh momentum/state)
+    
+    What Gets Loaded:
+    - Model weights: Always loaded
+    - Optimizer state: Loaded unless --reset-optimizer
+    - Scheduler state: Loaded unless --reset-scheduler
+    - Best metrics: Loaded to track improvement
+    - Epoch counter: Continues from last epoch
+    
+    Auto-Detection Priority:
+    1. checkpoints/last.pth (full training state with optimizer)
+    2. best_model.pth (model weights only, optimizer initialized fresh)
 
 CTRL-C Handling:
     Gracefully saves checkpoint before exit (SIGINT/SIGTERM handlers)
@@ -2405,13 +2442,130 @@ def setup_training_components(cfg: Config, train_ds: LeakMelDataset, leak_idx: i
     return model, optimizer, scheduler, scaler, cls_loss_fn, leak_bce, use_ta, time_mask, freq_mask
 
 
-def resume_from_checkpoint(cfg: Config, model, optimizer, scheduler, scaler, train_sampler: StatefulSampler, device: torch.device) -> Tuple[int, float, float, int]:
+def load_continual_checkpoint(cfg: Config, model, optimizer, scheduler, scaler, device: torch.device) -> Tuple[int, float, float, int]:
     """
-    Attempt to resume training from checkpoint.
+    Load checkpoint for continual learning (continuing training from existing model).
+    
+    Continual learning modes:
+    1. Full resume: Load model, optimizer, scheduler, and training state
+    2. Model-only: Load model weights, reset optimizer/scheduler (fresh training on new data)
+    3. Custom checkpoint: Load from specified path instead of auto-detect
     
     Returns:
         Tuple of (start_epoch, best_leak_f1, best_leak_thr, best_epoch)
     """
+    start_epoch = 1
+    best_leak_f1 = -1.0
+    best_leak_thr = 0.55
+    best_epoch = 0
+
+    # Determine checkpoint path
+    if cfg.continual_checkpoint:
+        ckpt_path = Path(cfg.continual_checkpoint)
+    else:
+        # Auto-detect: try last.pth, then best_model.pth
+        last_ckpt = cfg.checkpoints_dir / CHECKPOINT_LAST
+        best_ckpt = cfg.model_dir / CHECKPOINT_BEST
+        
+        if last_ckpt.exists():
+            ckpt_path = last_ckpt
+        elif best_ckpt.exists():
+            ckpt_path = best_ckpt
+            logger.warning("%sCONTINUAL: No last.pth found, using best_model.pth (no optimizer state)%s",
+                         YELLOW, RESET)
+        else:
+            logger.error("%sCONTINUAL: No checkpoint found for continual learning!%s", RED, RESET)
+            raise FileNotFoundError(f"No checkpoint found in {cfg.checkpoints_dir} or {cfg.model_dir}")
+    
+    if not ckpt_path.exists():
+        logger.error("%sCONTINUAL: Checkpoint not found: {ckpt_path}%s", RED, RESET)
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    
+    logger.info("%s" + "="*80 + "%s", CYAN, RESET)
+    logger.info("%sCONTINUAL LEARNING: Loading checkpoint from %s%s", CYAN, ckpt_path, RESET)
+    logger.info("%s" + "="*80 + "%s", CYAN, RESET)
+    
+    try:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        
+        # Handle torch.compile wrapper: unwrap "_orig_mod." prefix if needed
+        state_dict = ckpt.get("model", ckpt)  # Handle both full checkpoint and state_dict-only
+        model_state_keys = set(model.state_dict().keys())
+        checkpoint_keys = set(state_dict.keys())
+        
+        # Check if we need to add/remove "_orig_mod." prefix
+        if model_state_keys != checkpoint_keys:
+            # Case 1: Model is compiled but checkpoint is not
+            if any(k.startswith("_orig_mod.") for k in model_state_keys):
+                state_dict = {f"_orig_mod.{k}": v for k, v in state_dict.items()}
+                logger.info("%sCONTINUAL: Wrapped state_dict with _orig_mod prefix for compiled model%s", 
+                           CYAN, RESET)
+            # Case 2: Checkpoint is compiled but model is not
+            elif any(k.startswith("_orig_mod.") for k in checkpoint_keys):
+                state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+                logger.info("%sCONTINUAL: Unwrapped state_dict (_orig_mod prefix) from compiled checkpoint%s", 
+                           CYAN, RESET)
+        
+        # Load model weights (always)
+        model.load_state_dict(state_dict)
+        logger.info("%sCONTINUAL: ✓ Model weights loaded%s", GREEN, RESET)
+        
+        # Load training state (optional, based on reset flags)
+        if isinstance(ckpt, dict) and "optimizer" in ckpt:
+            if not cfg.continual_reset_optimizer:
+                optimizer.load_state_dict(ckpt["optimizer"])
+                logger.info("%sCONTINUAL: ✓ Optimizer state loaded%s", GREEN, RESET)
+            else:
+                logger.info("%sCONTINUAL: ✗ Optimizer reset (continual_reset_optimizer=True)%s", YELLOW, RESET)
+            
+            if not cfg.continual_reset_scheduler:
+                scheduler.load_state_dict(ckpt["scheduler"])
+                logger.info("%sCONTINUAL: ✓ Scheduler state loaded%s", GREEN, RESET)
+            else:
+                logger.info("%sCONTINUAL: ✗ Scheduler reset (continual_reset_scheduler=True)%s", YELLOW, RESET)
+            
+            # Always load scaler to match precision state
+            if "scaler" in ckpt:
+                scaler.load_state_dict(ckpt["scaler"])
+                logger.info("%sCONTINUAL: ✓ GradScaler state loaded%s", GREEN, RESET)
+            
+            # Start from next epoch (if not resetting optimizer)
+            if not cfg.continual_reset_optimizer and "epoch" in ckpt:
+                start_epoch = int(ckpt["epoch"]) + 1
+                logger.info("%sCONTINUAL: Starting from epoch %d%s", CYAN, start_epoch, RESET)
+            
+            # Load best metrics if available
+            best_leak_f1 = float(ckpt.get("best_leak_f1", best_leak_f1))
+            best_leak_thr = float(ckpt.get("best_leak_thr", best_leak_thr))
+            best_epoch = int(ckpt.get("best_epoch", best_epoch))
+            
+            if best_leak_f1 > 0:
+                logger.info("%sCONTINUAL: Previous best: leak_f1=%.4f @ epoch %d (thr=%.4f)%s",
+                           CYAN, best_leak_f1, best_epoch, best_leak_thr, RESET)
+        else:
+            logger.info("%sCONTINUAL: State-dict only checkpoint, optimizer/scheduler initialized fresh%s",
+                       YELLOW, RESET)
+        
+        logger.info("%s" + "="*80 + "%s", CYAN, RESET)
+        
+    except Exception as e:
+        logger.error("%sCONTINUAL: Failed to load checkpoint: %s%s", RED, e, RESET)
+        raise
+    
+    return start_epoch, best_leak_f1, best_leak_thr, best_epoch
+
+
+def resume_from_checkpoint(cfg: Config, model, optimizer, scheduler, scaler, train_sampler: StatefulSampler, device: torch.device) -> Tuple[int, float, float, int]:
+    """
+    Attempt to resume training from checkpoint (normal auto-resume, not continual learning).
+    
+    Returns:
+        Tuple of (start_epoch, best_leak_f1, best_leak_thr, best_epoch)
+    """
+    # Skip auto-resume if continual learning mode is active
+    if cfg.continual_learning:
+        return 1, -1.0, 0.55, 0
+    
     start_epoch = 1
     best_leak_f1 = -1.0
     best_leak_thr = 0.55
@@ -2666,7 +2820,12 @@ def train(cfg=None):
         val_ds = BinaryLabelDataset(val_ds, leak_idx)
     
     model, optimizer, scheduler, scaler, cls_loss_fn, leak_bce, use_ta, time_mask, freq_mask = setup_training_components(cfg, train_ds, leak_idx, device)
-    start_epoch, best_leak_f1, best_leak_thr, best_epoch = resume_from_checkpoint(cfg, model, optimizer, scheduler, scaler, train_sampler, device)
+    
+    # Handle checkpoint loading based on mode
+    if cfg.continual_learning:
+        start_epoch, best_leak_f1, best_leak_thr, best_epoch = load_continual_checkpoint(cfg, model, optimizer, scheduler, scaler, device)
+    else:
+        start_epoch, best_leak_f1, best_leak_thr, best_epoch = resume_from_checkpoint(cfg, model, optimizer, scheduler, scaler, train_sampler, device)
     
     best_leak_f1, best_epoch = run_training_loop(
         cfg, model, train_loader, val_loader, optimizer, scheduler, scaler, train_sampler,
