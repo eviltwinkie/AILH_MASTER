@@ -1,0 +1,68 @@
+{
+  "sensors": {
+    "S001": {
+      "name": "Main Street Alpha",
+      "position": {
+        "latitude": 40.7128,
+        "longitude": -74.006,
+        "elevation": 10.5
+      },
+      "site_id": "SITE_001",
+      "site_name": "Downtown District",
+      "logger_id": "12345",
+      "calibration": {
+        "gain_offset_db": 0.0
+      }
+    },
+    "S002": {
+      "name": "Main Street Beta",
+      "position": {
+        "latitude": 40.7138,
+        "longitude": -74.0055,
+        "elevation": 11.2
+      },
+      "site_id": "SITE_001",
+      "site_name": "Downtown District",
+      "logger_id": "67890",
+      "calibration": {}
+    },
+    "S003": {
+      "name": "Oak Avenue Gamma",
+      "position": {
+        "latitude": 40.7148,
+        "longitude": -74.005,
+        "elevation": 12.0
+      },
+      "site_id": "SITE_002",
+      "site_name": "Oak Avenue Zone",
+      "logger_id": "11111",
+      "calibration": {}
+    }
+  },
+  "sensor_pairs": [
+    {
+      "sensor_a": "S001",
+      "sensor_b": "S002",
+      "distance_meters": 100.0,
+      "pipe_segment": {
+        "material": "ductile_iron",
+        "diameter_mm": 300,
+        "installation_year": 1995,
+        "condition": "good"
+      },
+      "wave_speed_mps": 1400
+    },
+    {
+      "sensor_a": "S002",
+      "sensor_b": "S003",
+      "distance_meters": 150.0,
+      "pipe_segment": {
+        "material": "ductile_iron",
+        "diameter_mm": 300,
+        "installation_year": 1995,
+        "condition": null
+      },
+      "wave_speed_mps": 1400
+    }
+  ]
+}
