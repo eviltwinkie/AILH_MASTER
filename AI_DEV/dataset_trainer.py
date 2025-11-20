@@ -2359,7 +2359,25 @@ def resume_from_checkpoint(cfg: Config, model, optimizer, scheduler, scaler, tra
     if cfg.auto_resume and last_ckpt.exists():
         ckpt = torch.load(last_ckpt, map_location=device, weights_only=False)
         try:
-            model.load_state_dict(ckpt["model"])
+            # Handle torch.compile wrapper: unwrap "_orig_mod." prefix if needed
+            state_dict = ckpt["model"]
+            model_state_keys = set(model.state_dict().keys())
+            checkpoint_keys = set(state_dict.keys())
+            
+            # Check if we need to add/remove "_orig_mod." prefix
+            if model_state_keys != checkpoint_keys:
+                # Case 1: Model is compiled but checkpoint is not
+                if any(k.startswith("_orig_mod.") for k in model_state_keys):
+                    state_dict = {f"_orig_mod.{k}": v for k, v in state_dict.items()}
+                    logger.info("%sRESUME: Wrapped state_dict with _orig_mod prefix for compiled model%s", 
+                               CYAN, RESET)
+                # Case 2: Checkpoint is compiled but model is not
+                elif any(k.startswith("_orig_mod.") for k in checkpoint_keys):
+                    state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+                    logger.info("%sRESUME: Unwrapped state_dict (_orig_mod prefix) from compiled checkpoint%s", 
+                               CYAN, RESET)
+            
+            model.load_state_dict(state_dict)
             optimizer.load_state_dict(ckpt["optimizer"])
             scheduler.load_state_dict(ckpt["scheduler"])
             scaler.load_state_dict(ckpt["scaler"])
@@ -2480,6 +2498,23 @@ def run_final_test(cfg: Config, model, leak_idx: int, model_leak_idx: int, devic
     
     test_ds = LeakMelDataset(cfg.test_h5)
     state = torch.load(cfg.model_dir / CHECKPOINT_BEST, map_location=device, weights_only=False)
+    
+    # Handle torch.compile wrapper: unwrap "_orig_mod." prefix if needed
+    model_state_keys = set(model.state_dict().keys())
+    checkpoint_keys = set(state.keys())
+    
+    if model_state_keys != checkpoint_keys:
+        # Case 1: Model is compiled but checkpoint is not
+        if any(k.startswith("_orig_mod.") for k in model_state_keys):
+            state = {f"_orig_mod.{k}": v for k, v in state.items()}
+            logger.info("%sTEST: Wrapped state_dict with _orig_mod prefix for compiled model%s", 
+                       CYAN, RESET)
+        # Case 2: Checkpoint is compiled but model is not
+        elif any(k.startswith("_orig_mod.") for k in checkpoint_keys):
+            state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
+            logger.info("%sTEST: Unwrapped state_dict (_orig_mod prefix) from compiled checkpoint%s", 
+                       CYAN, RESET)
+    
     model.load_state_dict(state)
     model.eval()
     

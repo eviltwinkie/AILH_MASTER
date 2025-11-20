@@ -79,7 +79,8 @@ except ImportError:
 from dataset_trainer import (
     Config, LeakMelDataset, BinaryLabelDataset, StatefulSampler,
     train_one_epoch, evaluate_file_level, setup_datasets,
-    device_setup, set_seed, logger, CYAN, GREEN, YELLOW, RED, RESET
+    device_setup, set_seed, logger, CYAN, GREEN, YELLOW, RED, RESET,
+    LeakCNNMulti, setup_dataloaders, setup_loss_functions
 )
 
 # Constants
@@ -90,6 +91,13 @@ STORAGE_FILE = "study.db"
 BEST_PARAMS_FILE = "best_params.json"
 
 
+def cleanup_after_trial():
+    """Clean up GPU memory and caches after trial."""
+    import gc
+    torch.cuda.empty_cache()
+    gc.collect()
+
+
 class TuningConfig:
     """Configuration for hyperparameter optimization."""
     def __init__(self):
@@ -97,6 +105,9 @@ class TuningConfig:
         self.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS_BINARY")
         self.tuning_dir = self.model_dir / TUNING_SUBDIR
         self.plots_dir = self.tuning_dir / PLOTS_SUBDIR
+        
+        # Model mode
+        self.binary_mode = True  # True: LEAK/NOLEAK, False: 5-class
         
         # Optuna settings
         self.n_trials = 50
@@ -169,8 +180,8 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
     # Early stopping patience
     cfg.early_stop_patience = trial.suggest_int("early_stop_patience", 5, 20, step=5)
     
-    # Epochs for this trial
-    cfg.epochs = base_cfg.max_epochs_per_trial  # Will be stopped by pruning/early-stop
+    # Epochs for this trial (will be stopped early by pruning/early-stop)
+    cfg.epochs = 50
     
     return cfg
 
@@ -200,14 +211,11 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         device = device_setup()
         
         # Load datasets (with RAM preloading for speed)
-        train_ds, val_ds, train_indices, val_subset, leak_idx = setup_datasets(cfg)
+        train_ds, val_ds, train_file_ids, val_file_ids, leak_idx, train_indices, val_subset = setup_datasets(cfg)
         
         # Create model
-        from dataset_trainer import LeakCNNMulti
         model = LeakCNNMulti(
             n_classes=cfg.num_classes,
-            n_mels=train_ds.n_mels,
-            t_frames=train_ds.t_frames,
             dropout=cfg.dropout
         ).to(device)
         
@@ -215,23 +223,25 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         if cfg.use_channels_last:
             model = model.to(memory_format=torch.channels_last)  # type: ignore
         
+        model_compiled: nn.Module = model
         if cfg.use_compile:
-            model = torch.compile(model, mode=cfg.compile_mode)  # type: ignore
+            model_compiled = torch.compile(model, mode=cfg.compile_mode)  # type: ignore
         
         # Setup training components
-        from dataset_trainer import setup_dataloaders, create_loss_functions
-        
         train_loader, val_loader, train_sampler = setup_dataloaders(
             cfg, train_ds, train_indices, val_subset, leak_idx, cfg.binary_mode
         )
         
-        cls_loss_fn, leak_bce = create_loss_functions(cfg, train_ds, train_indices, leak_idx)
+        cls_loss_fn, leak_bce = setup_loss_functions(cfg, train_ds, leak_idx, device)
         
         optimizer = torch.optim.AdamW(
-            model.parameters(),  # type: ignore[arg-type]
+            model.parameters(),
             lr=cfg.learning_rate,
             weight_decay=1e-4
         )
+        
+        # Use compiled model for training/inference
+        train_model = model_compiled
         
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
@@ -250,7 +260,7 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
             # Train
             train_loss, train_acc = train_one_epoch(
                 epoch=epoch,
-                model=model,
+                model=train_model,
                 train_loader=train_loader,
                 optimizer=optimizer,
                 scaler=scaler,
@@ -267,17 +277,17 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
             )
             
             # Validate
-            val_metrics = evaluate_file_level(
-                model=model,
+            val_file_acc, val_metrics = evaluate_file_level(
+                model=train_model,
                 ds=val_ds if not cfg.binary_mode else BinaryLabelDataset(val_ds, leak_idx),
                 device=device,
-                batch_long_segments=0,
-                leak_idx=leak_idx,
-                model_leak_idx=model_leak_idx,
-                desc=f"[Trial {trial.number}] Val Epoch {epoch}"
+                dataset_leak_idx=leak_idx,
+                model_leak_idx=1 if cfg.binary_mode else leak_idx,
+                use_channels_last=cfg.use_channels_last,
+                batch_long_segments=0
             )
             
-            val_f1 = val_metrics["file_leak_f1"]
+            val_f1 = val_metrics["leak_f1"]
             
             logger.info(
                 f"Trial {trial.number} Epoch {epoch}/{cfg.epochs}: "
@@ -317,12 +327,16 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         
     except optuna.TrialPruned:
         raise
+    except torch.cuda.OutOfMemoryError:
+        logger.error(f"{RED}Trial {trial.number} failed: GPU OOM - try smaller batch_size{RESET}")
+        cleanup_after_trial()
+        return 0.0  # Return poor score instead of failing
     except Exception as e:
         logger.error(f"{RED}Trial {trial.number} failed: {e}{RESET}")
-        raise
-    finally:
-        # Cleanup
-        torch.cuda.empty_cache()
+        import traceback
+        traceback.print_exc()
+        cleanup_after_trial()
+        return 0.0  # Return poor score instead of failing
 
 
 def run_optimization(tuning_cfg: TuningConfig):
@@ -347,7 +361,9 @@ def run_optimization(tuning_cfg: TuningConfig):
     base_cfg.preload_to_ram = tuning_cfg.preload_to_ram
     base_cfg.num_workers = tuning_cfg.num_workers
     base_cfg.prefetch_factor = tuning_cfg.prefetch_factor
-    base_cfg.max_epochs_per_trial = tuning_cfg.max_epochs_per_trial
+    base_cfg.binary_mode = tuning_cfg.binary_mode  # Set binary mode from tuning config
+    base_cfg.num_classes = 2 if tuning_cfg.binary_mode else 5
+    base_cfg.model_dir = tuning_cfg.model_dir
     
     # Create or load study
     study = optuna.create_study(
@@ -372,14 +388,23 @@ def run_optimization(tuning_cfg: TuningConfig):
     logger.info(f"Max epochs per trial: {tuning_cfg.max_epochs_per_trial}")
     logger.info(f"{CYAN}{'='*80}{RESET}")
     
+    # Wrapper for cleanup
+    def wrapped_objective(trial: Trial) -> float:
+        cleanup_after_trial()  # Cleanup before trial
+        try:
+            return objective(trial, base_cfg, tuning_cfg)
+        finally:
+            cleanup_after_trial()  # Cleanup after trial
+    
     # Run optimization
     try:
         study.optimize(
-            lambda trial: objective(trial, base_cfg, tuning_cfg),
+            wrapped_objective,
             n_trials=tuning_cfg.n_trials,
             timeout=tuning_cfg.timeout,
             n_jobs=tuning_cfg.n_jobs,
-            show_progress_bar=True
+            show_progress_bar=True,
+            gc_after_trial=True  # Enable garbage collection
         )
     except KeyboardInterrupt:
         logger.info(f"{YELLOW}Optimization interrupted by user{RESET}")
@@ -457,6 +482,10 @@ def main():
     parser.add_argument("--n_jobs", type=int, default=1, help="Number of parallel trials (1 recommended for GPU)")
     parser.add_argument("--restart", action="store_true", help="Delete existing study and start fresh")
     parser.add_argument("--max_epochs", type=int, default=20, help="Maximum epochs per trial")
+    parser.add_argument("--binary_mode", action="store_true", default=True, 
+                       help="Train binary LEAK/NOLEAK model (default: True)")
+    parser.add_argument("--multiclass", action="store_true", 
+                       help="Train 5-class model instead of binary")
     
     args = parser.parse_args()
     
@@ -466,6 +495,19 @@ def main():
     tuning_cfg.n_jobs = args.n_jobs
     tuning_cfg.restart = args.restart
     tuning_cfg.max_epochs_per_trial = args.max_epochs
+    
+    # Handle mode selection
+    if args.multiclass:
+        tuning_cfg.binary_mode = False
+        tuning_cfg.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS")
+        logger.info(f"{CYAN}Mode: Multi-class (5 classes){RESET}")
+    else:
+        tuning_cfg.binary_mode = args.binary_mode
+        if tuning_cfg.binary_mode:
+            logger.info(f"{CYAN}Mode: Binary (LEAK/NOLEAK){RESET}")
+        else:
+            logger.info(f"{CYAN}Mode: Multi-class (5 classes){RESET}")
+            tuning_cfg.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS")
     
     run_optimization(tuning_cfg)
 
