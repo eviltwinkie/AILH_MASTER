@@ -45,6 +45,7 @@ Example Integration:
     cfg.learning_rate = best['learning_rate']
     cfg.batch_size = best['batch_size']
     # ... etc
+    
 """
 
 from __future__ import annotations
@@ -80,7 +81,8 @@ from dataset_trainer import (
     Config, LeakMelDataset, BinaryLabelDataset, StatefulSampler,
     train_one_epoch, evaluate_file_level, setup_datasets,
     device_setup, set_seed, logger, CYAN, GREEN, YELLOW, RED, RESET,
-    LeakCNNMulti, setup_dataloaders, setup_loss_functions
+    LeakCNNMulti, setup_dataloaders, setup_loss_functions,
+    SystemMonitor, GPUProfiler
 )
 
 # Constants
@@ -120,10 +122,10 @@ class TuningConfig:
         self.min_epochs_per_trial = 5   # Minimum before pruning
         self.pruning_warmup = 3         # Epochs before pruning starts
         
-        # Fixed dataset params (use RAM preloading for speed)
+        # Fixed dataset params (use optimized settings from training)
         self.preload_to_ram = True
-        self.num_workers = 8  # Fewer workers for tuning (less memory per trial)
-        self.prefetch_factor = 12
+        self.num_workers = 20  # Match optimized training config
+        self.prefetch_factor = 48  # Match optimized training config
         
     def setup_dirs(self):
         """Create tuning directories."""
@@ -143,6 +145,7 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
     cfg.stage_dir = base_cfg.stage_dir
     cfg.model_dir = base_cfg.model_dir
     cfg.binary_mode = base_cfg.binary_mode
+    cfg.num_classes = base_cfg.num_classes
     cfg.preload_to_ram = base_cfg.preload_to_ram
     cfg.num_workers = base_cfg.num_workers
     cfg.prefetch_factor = base_cfg.prefetch_factor
@@ -153,8 +156,8 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
     # Learning rate (log scale)
     cfg.learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
     
-    # Batch size (GPU memory constrained)
-    cfg.batch_size = trial.suggest_categorical("batch_size", [4096, 8192, 12288, 16384])
+    # Batch size (GPU memory constrained) - Start from 8192 minimum for GPU utilization
+    cfg.batch_size = trial.suggest_categorical("batch_size", [12288, 16384, 20480, 24576])
     cfg.val_batch_size = cfg.batch_size // 2
     
     # Dropout regularization
@@ -213,6 +216,13 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         # Load datasets (with RAM preloading for speed)
         train_ds, val_ds, train_file_ids, val_file_ids, leak_idx, train_indices, val_subset = setup_datasets(cfg)
         
+        # Validate dataset sizes
+        if len(train_indices) == 0:
+            logger.error(f"{RED}Trial {trial.number} failed: No training data{RESET}")
+            return 0.0
+        
+        logger.info(f"Trial {trial.number}: {len(train_indices)} train samples, {len(val_subset)} val samples")
+        
         # Create model
         model = LeakCNNMulti(
             n_classes=cfg.num_classes,
@@ -231,6 +241,16 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         train_loader, val_loader, train_sampler = setup_dataloaders(
             cfg, train_ds, train_indices, val_subset, leak_idx, cfg.binary_mode
         )
+        
+        # Debug: Check DataLoader sizes
+        logger.info(f"Trial {trial.number}: train_loader has {len(train_loader)} batches (batch_size={cfg.batch_size})")
+        logger.info(f"Trial {trial.number}: val_loader has {len(val_loader)} batches")
+        
+        if len(train_loader) == 0:
+            logger.error(f"{RED}Trial {trial.number} failed: train_loader is empty!{RESET}")
+            logger.error(f"  train_indices: {len(train_indices)}, batch_size: {cfg.batch_size}")
+            logger.error(f"  Expected batches: {len(train_indices) // cfg.batch_size}")
+            return 0.0
         
         cls_loss_fn, leak_bce = setup_loss_functions(cfg, train_ds, leak_idx, device)
         
@@ -251,12 +271,19 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         
         scaler = torch.amp.GradScaler('cuda')
         
+        # Create monitors for training (reuse across epochs for tuning)
+        sys_monitor = SystemMonitor(device=device, enabled=False)  # Disable for tuning speed
+        profiler = GPUProfiler(device=device, enabled=False) if torch.cuda.is_available() else None
+        
         # Training loop
         best_val_f1 = 0.0
         no_improve_count = 0
         model_leak_idx = 1 if cfg.binary_mode else leak_idx
         
         for epoch in range(1, cfg.epochs + 1):
+            # Reset sampler for new epoch
+            train_sampler.on_epoch_start(epoch)
+            
             # Train
             train_loss, train_acc = train_one_epoch(
                 epoch=epoch,
@@ -273,7 +300,9 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                 use_ta=False,  # Disable augmentation for tuning speed
                 time_mask=None,
                 freq_mask=None,
-                interrupted={"flag": False}
+                interrupted={"flag": False},
+                sys_monitor=sys_monitor,
+                profiler=profiler
             )
             
             # Validate

@@ -84,6 +84,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Iterator, Union, cast
@@ -125,6 +126,9 @@ CHECKPOINT_LAST = "last.pth"
 CHECKPOINT_BEST = "best.pth"
 CHECKPOINT_EPOCH_PREFIX = "epoch_"
 MODEL_METADATA_FILE = "model_meta.json"
+
+# Global thread pool for async checkpoint saving
+_CHECKPOINT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ckpt_saver")
 
 
 # ======================================================================
@@ -367,8 +371,9 @@ class Config:
     log_dir: Path = Path("/DEVELOPMENT/DATASET_REFERENCE/LOGS")
 
     # ========== TRAINING HYPERPARAMETERS ==========
-    batch_size: int = 16384             # Training batch size (maximized for GPU utilization)
-    val_batch_size: int = 8192          # Validation batch size (maximized for throughput)
+    batch_size: int = 32768             # Training batch size (large batch for smooth GPU utilization)
+    val_batch_size: int = 16384         # Validation batch size (optimized for throughput)
+    grad_accum_steps: int = 1           # Gradient accumulation (1=disabled, incompatible with CUDA Graphs)
     epochs: int = 200                   # Maximum training epochs
     learning_rate: float = 1e-3         # Initial learning rate for AdamW
     dropout: float = 0.25               # Dropout probability for regularization
@@ -392,8 +397,8 @@ class Config:
     leak_oversample_factor: int = 1     # Duplicate LEAK segments N times (1=disabled)
 
     # ========== DATALOADER CONFIGURATION ==========
-    num_workers: int = 12               # Parallel data loading workers (maximized for throughput)
-    prefetch_factor: int = 24           # Batches to prefetch per worker (extreme prefetch)
+    num_workers: int = 20               # Parallel data loading workers (maximized for throughput)
+    prefetch_factor: int = 48           # Batches to prefetch per worker (extreme prefetch for smooth GPU feeding)
     persistent_workers: bool = True     # Keep workers alive between epochs
     pin_memory: bool = True             # Pin memory for faster GPU transfer
     preload_to_ram: bool = True         # Preload entire dataset to RAM (requires ~8GB, eliminates I/O)
@@ -1644,6 +1649,7 @@ def evaluate_file_level(
     use_channels_last: bool = True,
     threshold: float = 0.5,
     batch_long_segments: int = 0,  # 0 = process entire file at once (best GPU util)
+    target_segments: int = 8192,  # Target number of segments per GPU batch (consistent load)
 ) -> Tuple[float, Dict[str, float]]:
     """
     Paper-exact file-level evaluation with 50% voting threshold.
@@ -1712,102 +1718,104 @@ def evaluate_file_level(
     
     try:
         with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.float16):
+            # Process files in dynamic batches based on segment count for consistent GPU load
+            segments_per_file = ds.num_long * ds.num_short
+            
             pbar = tqdm(
-                range(ds.num_files),
                 desc="[File-Level Eval]",
+                total=ds.num_files,
                 unit="file",
                 leave=True,
                 position=0,
                 dynamic_ncols=True,
-                mininterval=0.2,
+                mininterval=0.5,
                 file=sys.stdout,
             )
             
-            for fidx in pbar:
-                # Load entire file block: [num_long, num_short, (C,) n_mels, t_frames]
-                blk = ds._segs[fidx]  # type: ignore[index]
-                true_label = int(ds._labels[fidx])  # type: ignore[index,arg-type]
-                true_is_leak = 1 if true_label == dataset_leak_idx else 0
-                true_leak_count += true_is_leak
+            fidx = 0
+            while fidx < ds.num_files:
+                # Dynamically determine batch size based on target segments
+                files_in_batch = max(1, target_segments // segments_per_file)
+                batch_end = min(fidx + files_in_batch, ds.num_files)
                 
-                # Process each long segment (pre-allocate numpy array for efficiency)
-                probs_long = np.zeros(ds.num_long, dtype=np.float32)
+                # Collect all segments from files in this batch
+                file_segments = []
+                file_labels = []
+                file_num_segments = []
                 
-                # Batch process long segments for better GPU utilization
-                # If batch_long_segments == 0, process entire file at once for maximum GPU efficiency
-                effective_batch_size = ds.num_long if batch_long_segments == 0 else batch_long_segments
-                
-                for batch_start in range(0, ds.num_long, effective_batch_size):
-                    batch_end = min(batch_start + effective_batch_size, ds.num_long)
-                    batch_size = batch_end - batch_start
+                for file_idx in range(fidx, batch_end):
+                    # Load entire file: [num_long, num_short, (C,) n_mels, t_frames]
+                    blk = ds._segs[file_idx]  # type: ignore[index]
+                    true_label = int(ds._labels[file_idx])  # type: ignore[index,arg-type]
+                    true_is_leak = 1 if true_label == dataset_leak_idx else 0
+                    true_leak_count += true_is_leak
+                    file_labels.append(true_is_leak)
                     
-                    # Collect all short segments for this batch of long segments
-                    mel_batch_list = []
-                    for li in range(batch_start, batch_end):
-                        # Get all short segments within this long segment
+                    # Collect all segments from this file
+                    for li in range(ds.num_long):
                         mel = blk[li]  # type: ignore[index] # [num_short, (C,) n_mels, t_frames]
-                        
-                        # Handle channel dimension if present
                         if ds._has_channel:
-                            mel = mel[:, 0]  # type: ignore[index] # Take first channel: [num_short, n_mels, t_frames]
-                        
-                        mel_batch_list.append(mel)
+                            mel = mel[:, 0]  # type: ignore[index]
+                        file_segments.append(mel)
                     
-                    # Stack into single batch: [batch_size * num_short, n_mels, t_frames]
-                    mel_batch_np = np.concatenate(mel_batch_list, axis=0)  # type: ignore[arg-type]
-                    
-                    # Prepare batch for model input
-                    mel_t = prepare_mel_batch(
-                        mel_batch_np,  # type: ignore[arg-type]
-                        device,
-                        use_channels_last,
-                        dtype=torch.float16
-                    )
-                    
-                    # Forward pass for entire batch
-                    fwd_start = time.perf_counter()
-                    logits, leak_logit = model(mel_t)  # logits: [batch_size * num_short, n_classes]
-                    forward_times.append(time.perf_counter() - fwd_start)
-                    
-                    # Compute combined leak probability
-                    p_cls = torch.softmax(logits, dim=1)[:, model_leak_idx]  # [batch_size * num_short]
-                    p_aux = torch.sigmoid(leak_logit)  # [batch_size * num_short]
-                    p_combined = 0.5 * (p_cls + p_aux)  # [batch_size * num_short]
-                    
-                    # Reshape to [batch_size, num_short] and average across short segments
-                    p_combined = p_combined.view(batch_size, ds.num_short)
-                    p_long_batch = p_combined.mean(dim=1)  # [batch_size]
-                    
-                    # Store results for each long segment in this batch
-                    for i, li in enumerate(range(batch_start, batch_end)):
-                        probs_long[li] = float(p_long_batch[i].item())
+                    file_num_segments.append(ds.num_long * ds.num_short)
                 
-                # File-level decision: ≥50% of long segments must exceed threshold
-                # Use ceiling_half helper for proper 50% threshold (handles odd num_long)
-                num_long_above_threshold = sum(1 for p in probs_long if p >= threshold)
-                vote_threshold = ceiling_half(ds.num_long)
-                pred_is_leak = 1 if num_long_above_threshold >= vote_threshold else 0
+                # Stack all segments: [total_segments, n_mels, t_frames]
+                mel_batch_np = np.concatenate(file_segments, axis=0)  # type: ignore[arg-type]
                 
-                # Update metrics
-                if pred_is_leak == true_is_leak:
-                    correct += 1
+                # Prepare for GPU
+                mel_t = prepare_mel_batch(
+                    mel_batch_np,  # type: ignore[arg-type]
+                    device,
+                    use_channels_last,
+                    dtype=torch.float16
+                )
                 
-                if pred_is_leak == 1:
-                    pred_leaks += 1
-                    if true_is_leak == 1:
-                        true_positives += 1
-                    else:
-                        false_positives += 1
-                else:
-                    if true_is_leak == 1:
+                # Single GPU forward pass for all files in batch
+                fwd_start = time.perf_counter()
+                logits, leak_logit = model(mel_t)
+                forward_times.append(time.perf_counter() - fwd_start)
+                
+                # Compute leak probabilities
+                p_cls = torch.softmax(logits, dim=1)[:, model_leak_idx]
+                p_aux = torch.sigmoid(leak_logit).squeeze(-1)
+                p_combined = 0.5 * (p_cls + p_aux)
+                p_combined_cpu = p_combined.cpu().numpy()
+                
+                # Process each file's results
+                seg_offset = 0
+                for file_idx, (true_is_leak, num_segs) in enumerate(zip(file_labels, file_num_segments)):
+                    # Extract this file's probabilities
+                    file_probs = p_combined_cpu[seg_offset:seg_offset + num_segs]
+                    seg_offset += num_segs
+                    
+                    # Reshape to [num_long, num_short] and average per long segment
+                    file_probs = file_probs.reshape(ds.num_long, ds.num_short)
+                    probs_long = file_probs.mean(axis=1)  # [num_long]
+                    
+                    # File-level decision: ≥50% of long segments exceed threshold
+                    num_long_above = sum(1 for p in probs_long if p >= threshold)
+                    vote_threshold = ceiling_half(ds.num_long)
+                    pred_is_leak = 1 if num_long_above >= vote_threshold else 0
+                    
+                    # Update metrics
+                    if pred_is_leak == true_is_leak:
+                        correct += 1
+                    
+                    if pred_is_leak == 1:
+                        pred_leaks += 1
+                        if true_is_leak == 1:
+                            true_positives += 1
+                        else:
+                            false_positives += 1
+                    elif true_is_leak == 1:
                         false_negatives += 1
-                
-                total += 1
-                
-                # Update status
-                status.update(done=total, correct=correct, pred_leaks=pred_leaks)
+                    
+                    total += 1
                 
                 # Update progress bar
+                fidx = batch_end
+                pbar.update(batch_end - (fidx - files_in_batch))
                 pbar.set_postfix({
                     "acc": f"{(correct / max(total, 1)):.4f}",
                     "leak%": f"{(100.0 * pred_leaks / max(total, 1)):.1f}",
@@ -1868,7 +1876,9 @@ def train_one_epoch(
     use_ta: bool,
     time_mask: Optional[nn.Module],
     freq_mask: Optional[nn.Module],
-    interrupted: Dict[str, bool]
+    interrupted: Dict[str, bool],
+    sys_monitor: SystemMonitor,
+    profiler: Optional[GPUProfiler]
 ) -> Tuple[float, float]:
     """
     Train for one epoch.
@@ -1877,25 +1887,33 @@ def train_one_epoch(
         Tuple of (train_loss, train_acc)
     """
     model.train()  # type: ignore[attr-defined]
-    running_loss = 0.0
+    running_loss = torch.tensor(0.0, device=device, dtype=torch.float32)  # Accumulate on GPU
     correct_count = torch.tensor(0, device=device, dtype=torch.int64)  # Accumulate on GPU
     seen = 0
     
-    # System monitoring
-    sys_monitor = SystemMonitor(device, enabled=True)
+    # Reuse pre-created monitors (passed as arguments, no initialization overhead)
     
-    # Performance profiling
-    profiler = GPUProfiler(device, enabled=cfg.profile_gpu_util) if cfg.profile_performance else None
-    if profiler:
-        profiler.start()
-    
-    pbar = tqdm(total=len(train_loader), desc=f"[Train] Epoch {epoch}/{cfg.epochs}", unit="batch")
+    pbar = tqdm(
+        total=len(train_loader),
+        desc=f"[Train] Epoch {epoch}/{cfg.epochs}",
+        unit="batch",
+        mininterval=1.0,
+        smoothing=0.1,
+        disable=False,
+        leave=True,
+    )
     batch_times = []
     dataloader_times = []
     prev_batch_end = time.perf_counter()
     
-    # Sample system stats every N batches
-    report_interval = max(1, len(train_loader) // 10)  # 10 reports per epoch
+    # Sample system stats every N batches (reduce sync overhead)
+    report_interval = max(20, len(train_loader) // 5)  # 5 reports per epoch (was 10)
+    
+    # Gradient accumulation setup
+    accum_steps = cfg.grad_accum_steps
+    effective_batch = cfg.batch_size * accum_steps
+    if accum_steps > 1:
+        logger.debug(f"Gradient accumulation: {accum_steps} steps, effective batch: {effective_batch}")
     
     for batch_idx, (mel_batch, labels) in enumerate(train_loader):
         # Measure DataLoader iterator time (CPU→GPU data pipeline)
@@ -1907,9 +1925,13 @@ def train_one_epoch(
         if interrupted["flag"]:
             break
         
-        # Prepare inputs
+        # Prepare inputs (non_blocking allows GPU to work while CPU prepares next batch)
         mel_batch = prepare_mel_batch(mel_batch, device, cfg.use_channels_last)
         labels = labels.to(device, non_blocking=True)
+        
+        # Mark CUDA Graph step boundary for torch.compile
+        if cfg.use_compile:
+            torch.compiler.cudagraph_mark_step_begin()
         
         if profiler and batch_idx % 50 == 0:
             profiler.sample(f"batch_{batch_idx}")
@@ -1920,8 +1942,13 @@ def train_one_epoch(
                 if time_mask: mel_batch = time_mask(mel_batch)
                 if freq_mask: mel_batch = freq_mask(mel_batch)
         
-        # Forward + backward
-        optimizer.zero_grad(set_to_none=True)
+        # Forward + backward with gradient accumulation
+        is_accum_step = (batch_idx + 1) % accum_steps != 0
+        
+        # Don't zero gradients on accumulation steps
+        if not is_accum_step or batch_idx == 0:
+            optimizer.zero_grad(set_to_none=True)
+        
         with torch.amp.autocast('cuda'):
             logits, leak_logit = model(mel_batch)
             loss_cls = cls_loss_fn(logits, labels)
@@ -1948,16 +1975,22 @@ def train_one_epoch(
             else:
                 loss = loss_cls
         
-        scaler.scale(loss).backward()
-        if cfg.grad_clip_norm is not None:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)  # type: ignore[attr-defined]
-        scaler.step(optimizer)
-        scaler.update()
+        # Scale loss for gradient accumulation
+        loss = loss / accum_steps
         
-        # Track metrics (accumulate on GPU to reduce sync overhead)
+        scaler.scale(loss).backward()
+        
+        # Only step optimizer after accumulating gradients
+        if not is_accum_step:
+            if cfg.grad_clip_norm is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)  # type: ignore[attr-defined]
+            scaler.step(optimizer)
+            scaler.update()
+        
+        # Track metrics (keep on GPU to avoid sync, only sync at report intervals)
         bs = labels.size(0)
-        running_loss += loss.item() * bs  # Already scalar, no float() needed
+        running_loss += (loss.detach() * accum_steps) * bs  # Unscale loss for proper average
         preds = logits.argmax(dim=1)
         correct_count += (preds == labels).sum()  # Keep on GPU
         seen += bs
@@ -1977,7 +2010,7 @@ def train_one_epoch(
     
     # Single CPU↔GPU sync at end (optimization)
     correct = int(correct_count.item())
-    train_loss = running_loss / max(seen, 1)
+    train_loss = float(running_loss.item()) / max(seen, 1)  # Sync once at end
     train_acc = correct / max(seen, 1)
     
     # Collect final system stats for epoch summary
@@ -2032,11 +2065,12 @@ def save_checkpoint(
     leak_idx: int
 ) -> bool:
     """
-    Save training checkpoint.
+    Save training checkpoint asynchronously to avoid blocking training.
     
     Returns:
         True if successful, False otherwise
     """
+    # Prepare checkpoint data (quick, on main thread)
     ckpt = {
         "epoch": epoch + 1,
         "model": model.state_dict(),  # type: ignore[attr-defined]
@@ -2053,15 +2087,35 @@ def save_checkpoint(
         "leak_idx": leak_idx,
     }
     
-    try:
-        torch.save(ckpt, cfg.checkpoints_dir / CHECKPOINT_LAST)
-        torch.save(ckpt, cfg.checkpoints_dir / f"{CHECKPOINT_EPOCH_PREFIX}{epoch:03d}.pth")
-        rotate_checkpoints(cfg.checkpoints_dir, keep_last_k=cfg.keep_last_k)
-        return True
-    except Exception as e:
-        logger.error("%sFailed to save checkpoint: %s%s", RED, e, RESET)
-        logger.error("%sTraining will continue but progress may be lost if interrupted!%s", RED, RESET)
-        return False
+    # Deep copy state dicts to avoid issues if model changes during save
+    ckpt_copy = {
+        "epoch": ckpt["epoch"],
+        "model": {k: v.cpu().clone() for k, v in ckpt["model"].items()},
+        "optimizer": ckpt["optimizer"],
+        "scheduler": ckpt["scheduler"],
+        "scaler": ckpt["scaler"],
+        "rng_state": ckpt["rng_state"],
+        "train_sampler_state": ckpt["train_sampler_state"],
+        "best_leak_f1": best_leak_f1,
+        "best_leak_thr": best_leak_thr,
+        "best_epoch": best_epoch,
+        "config": ckpt["config"],
+        "class_names": class_names,
+        "leak_idx": leak_idx,
+    }
+    
+    def _save():
+        """Background thread saves checkpoint."""
+        try:
+            torch.save(ckpt_copy, cfg.checkpoints_dir / CHECKPOINT_LAST)
+            torch.save(ckpt_copy, cfg.checkpoints_dir / f"{CHECKPOINT_EPOCH_PREFIX}{epoch:03d}.pth")
+            rotate_checkpoints(cfg.checkpoints_dir, keep_last_k=cfg.keep_last_k)
+        except Exception as e:
+            logger.error("%sFailed to save checkpoint: %s%s", RED, e, RESET)
+    
+    # Submit to background thread (non-blocking)
+    _CHECKPOINT_EXECUTOR.submit(_save)
+    return True
 
 
 def save_best_model(
@@ -2270,6 +2324,7 @@ def setup_dataloaders(cfg: Config, train_ds: Dataset, train_indices: List[int], 
         pin_memory=cfg.pin_memory,
         persistent_workers=(cfg.persistent_workers and cfg.num_workers > 0),
         prefetch_factor=(cfg.prefetch_factor if cfg.num_workers > 0 else None),
+        multiprocessing_context='fork' if cfg.num_workers > 0 else None,  # Faster worker startup
         drop_last=False,
     )
     
@@ -2286,6 +2341,7 @@ def setup_dataloaders(cfg: Config, train_ds: Dataset, train_indices: List[int], 
         pin_memory=cfg.pin_memory,
         persistent_workers=(cfg.persistent_workers and val_workers > 0),
         prefetch_factor=max(2, cfg.prefetch_factor - 1),
+        multiprocessing_context='fork' if val_workers > 0 else None,  # Faster worker startup
         drop_last=False,
     )
     
@@ -2422,6 +2478,12 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
 
+    # Create monitors once for all epochs (reuse to avoid initialization overhead)
+    sys_monitor = SystemMonitor(device, enabled=True)
+    profiler = GPUProfiler(device, enabled=cfg.profile_gpu_util) if cfg.profile_performance else None
+    if profiler:
+        profiler.start()
+
     no_improve = 0
     for epoch in range(start_epoch, cfg.epochs + 1):
         train_sampler.on_epoch_start(epoch)
@@ -2429,7 +2491,7 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
         train_loss, train_acc = train_one_epoch(
             epoch, model, train_loader, optimizer, scaler,
             cls_loss_fn, leak_bce, cfg, leak_idx, model_leak_idx, device,
-            use_ta, time_mask, freq_mask, interrupted
+            use_ta, time_mask, freq_mask, interrupted, sys_monitor, profiler
         )
 
         metrics = eval_split(model, val_loader, device, leak_idx, cfg.use_channels_last)
