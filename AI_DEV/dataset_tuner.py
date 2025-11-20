@@ -85,6 +85,9 @@ from dataset_trainer import (
     SystemMonitor, GPUProfiler
 )
 
+# Import from global_config
+from global_config import PROC_MODELS
+
 # Constants
 TUNING_SUBDIR = "tuning"
 PLOTS_SUBDIR = "plots"
@@ -103,13 +106,11 @@ def cleanup_after_trial():
 class TuningConfig:
     """Configuration for hyperparameter optimization."""
     def __init__(self):
-        # Base paths
-        self.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS_BINARY")
-        self.tuning_dir = self.model_dir / TUNING_SUBDIR
-        self.plots_dir = self.tuning_dir / PLOTS_SUBDIR
+        # Base paths - will be set based on binary_mode, but can be overridden
+        self.model_dir = Path(PROC_MODELS) / "multiclass"  # Default to multi-class
         
         # Model mode
-        self.binary_mode = True  # True: LEAK/NOLEAK, False: 5-class
+        self.binary_mode = False  # False: 5-class (default), True: LEAK/NOLEAK
         
         # Optuna settings
         self.n_trials = 50
@@ -127,6 +128,16 @@ class TuningConfig:
         self.num_workers = 20  # Match optimized training config
         self.prefetch_factor = 48  # Match optimized training config
         self.persistent_workers = False  # Disable to prevent DataLoader deadlocks during tuning
+    
+    @property
+    def tuning_dir(self) -> Path:
+        """Dynamically compute tuning directory based on current model_dir."""
+        return self.model_dir / TUNING_SUBDIR
+    
+    @property
+    def plots_dir(self) -> Path:
+        """Dynamically compute plots directory based on current model_dir."""
+        return self.tuning_dir / PLOTS_SUBDIR
         
     def setup_dirs(self):
         """Create tuning directories."""
@@ -531,15 +542,16 @@ def main():
     # Handle mode selection
     if args.multiclass:
         tuning_cfg.binary_mode = False
-        tuning_cfg.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS")
+        tuning_cfg.model_dir = Path(PROC_MODELS) / "multiclass"
         logger.info(f"{CYAN}Mode: Multi-class (5 classes){RESET}")
     else:
         tuning_cfg.binary_mode = args.binary_mode
         if tuning_cfg.binary_mode:
+            tuning_cfg.model_dir = Path(PROC_MODELS) / "binary"
             logger.info(f"{CYAN}Mode: Binary (LEAK/NOLEAK){RESET}")
         else:
+            tuning_cfg.model_dir = Path(PROC_MODELS) / "multiclass"
             logger.info(f"{CYAN}Mode: Multi-class (5 classes){RESET}")
-            tuning_cfg.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS")
     
     run_optimization(tuning_cfg)
 

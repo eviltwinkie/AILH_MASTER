@@ -27,7 +27,7 @@ Key Features:
     - Multi-threaded WAV loading and resampling
     - HDF5 output with in-RAM assembly and efficient disk flushing
     - Stores builder config and labels as HDF5 attributes
-    - Support for multiple label sets (2-class, 5-class, 6-class)
+    - Support for multiple label sets (2-class, 5-class)
     - Global label mapping across train/validation/test splits
 
 Two-Stage Segmentation:
@@ -57,8 +57,7 @@ Output Files:
 
 Supported Label Sets:
     2-class: LEAK, NOLEAK
-    5-class: LEAK, NORMAL, QUIET, RANDOM, MECHANICAL
-    6-class: + UNCLASSIFIED
+    5-class: BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED
 
 Configuration:
     - cpu_max_workers: 4 (disk I/O threads)
@@ -208,6 +207,7 @@ class Config:
         - CNN_KERNEL_SIZE: Convolution kernel size (3, 3)
         - CNN_POOL_SIZE: Pooling size (2, 2)
         - CNN_STRIDES: Stride size (2, 2)
+        - CNN_DENSE: Dense layer units (128)
     
     Miscellaneous:
         - track_times: Enable HDF5 timestamp tracking (False)
@@ -231,7 +231,7 @@ class Config:
     # Add parent directory to sys.path
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
-    from global_config import MASTER_DATASET, DATASET_TRAINING , DATASET_VALIDATION, DATASET_TESTING
+    from global_config import MASTER_DATASET, DATASET_TRAINING, DATASET_VALIDATION, DATASET_TESTING
 
     # Roots
     stage_dir: Path = Path(MASTER_DATASET)
@@ -261,6 +261,7 @@ class Config:
     CNN_KERNEL_SIZE: Tuple[int, int] = (3, 3)
     CNN_POOL_SIZE: Tuple[int, int] = (2, 2)
     CNN_STRIDES: Tuple[int, int] = (2, 2)
+    CNN_DENSE: int = 128
 
     # Mel params (aligned with trainer)
     n_mels: int = 64
@@ -973,6 +974,7 @@ class MultiSplitBuilder:
                 "kernel_size": list(cfg.CNN_KERNEL_SIZE),
                 "pool_size": list(cfg.CNN_POOL_SIZE),
                 "strides": list(cfg.CNN_STRIDES),
+                "dense_units": cfg.CNN_DENSE,
             })
             h5f.attrs["labels_json"] = json.dumps(global_label_list)
             h5f.attrs["label2id_json"] = json.dumps(global_label2id)

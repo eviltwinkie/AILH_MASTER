@@ -10,26 +10,10 @@ import os
 
 DEBUG = False
 
-os.environ["KERAS_BACKEND"] = "tensorflow"
-os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+# PyTorch/CUDA Configuration (TensorFlow removed - project uses PyTorch exclusively)
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
-os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
-os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0" 
-os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
 os.environ["CUDA_MODULE_LOADING"] = "EAGER"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-
-# Less aggressive optimization settings to prevent cuDNN issues
-os.environ["TF_XLA_FLAGS"] = "--tf_xla_cpu_global_jit=false --tf_xla_auto_jit=0"
-os.environ["TF_DISABLE_MKL"] = "0"  # Re-enable MKL for stability
-
-# cuDNN specific settings
-os.environ["TF_CUDNN_DETERMINISTIC"] = "1"  # Force deterministic cuDNN
-
-#os.environ["OMP_NUM_THREADS"] = "4"
-#os.environ["TF_NUM_INTEROP_THREADS"] = "2"
-#os.environ["TF_NUM_INTRAOP_THREADS"] = "4"
 
 # ======================
 # PATH CONFIGURATION
@@ -41,7 +25,7 @@ DATA_SENSORS = os.path.join(ROOT_DIR, "DATA_SENSORS")
 
 # Dataset directories (derived from MASTER_DATASET)
 MASTER_DATASET = os.path.join(DATA_STORE, "MASTER_DATASET")      # ⭐ Source of truth
-DATASET_TRAINING = os.path.join(DATA_STORE, "MASTER_DATASET")  # 70% of MASTER_DATASET
+DATASET_TRAINING = os.path.join(DATA_STORE, "DATASET_TRAINING")  # 70% of MASTER_DATASET
 DATASET_VALIDATION = os.path.join(DATA_STORE, "DATASET_VALIDATION")  # 20% of MASTER_DATASET
 DATASET_TESTING = os.path.join(DATA_STORE, "DATASET_TESTING")    # 10% of MASTER_DATASET
 DATASET_LEARNING = os.path.join(DATA_STORE, "DATASET_LEARNING")  # Incremental learning data
@@ -59,24 +43,9 @@ os.environ["CACHE_DIR"] = CACHE_DIR
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 TEMP_DIR = os.path.join(DATA_STORE, "PROC_TEMP")
-os.environ["TEMP"] = TEMP_DIR
+os.environ["TEMP_DIR"] = TEMP_DIR
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-KERAS_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "KERAS")
-os.environ["KERAS_CACHE"] = KERAS_CACHE
-os.makedirs(KERAS_CACHE, exist_ok=True)
-
-TORCH_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "TORCH")
-os.environ["TORCH_CACHE"] = TORCH_CACHE
-os.makedirs(TORCH_CACHE, exist_ok=True)
-
-XDG_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "XDG")
-os.environ["XDG_CACHE"] = XDG_CACHE
-os.makedirs(XDG_CACHE, exist_ok=True)
-
-NUMPY_CACHE = os.path.join(DATA_STORE, "PROC_CACHE", "NUMPY")
-os.environ["NUMPY_CACHE"] = NUMPY_CACHE
-os.makedirs(NUMPY_CACHE, exist_ok=True)
 
 
 
@@ -103,8 +72,11 @@ SHORT_SEGMENT_POINTS = 512
 
 N_FFT = SHORT_SEGMENT_POINTS # typically set equal to short segment length           
 N_MELS = 32            
-HOP_LENGTH = 128        
+HOP_LENGTH = 128
 
+# CNN Training Hyperparameters (Legacy defaults for reference only)
+# NOTE: Actual training uses Optuna-tuned values from PROC_MODELS/{binary,multiclass}/tuning/best_params.json
+#       Production values: batch_size=32768, epochs=120, lr=0.0015, dropout=0.1, focal_alpha=0.25, focal_gamma=2.0        
 CNN_BATCH_SIZE = 64
 CNN_DROPOUT = 0.25
 CNN_EPOCHS = 200

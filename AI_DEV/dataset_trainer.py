@@ -1255,7 +1255,7 @@ class LeakCNNMulti(nn.Module):
     
     Supports two modes:
     - Binary mode (n_classes=2): LEAK vs NOLEAK classification
-    - Multi-class mode (n_classes=5): LEAK, NORMAL, QUIET, RANDOM, MECHANICAL
+    - Multi-class mode (n_classes=5): BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED
     
     Architecture:
     -------------

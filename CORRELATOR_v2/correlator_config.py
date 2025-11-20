@@ -15,7 +15,7 @@ import sys
 
 # Import global AILH configuration
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from global_config import *
+from AI_DEV.global_config import *
 
 # ==============================================================================
 # CORRELATOR-SPECIFIC CONFIGURATION

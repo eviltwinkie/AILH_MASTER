@@ -47,8 +47,22 @@ Usage Examples:
     python ai_builder.py --tune-and-train-binary --n_trials 50 --fresh
 
 Author: AI Development Team
-Version: 1.0
-Last Updated: November 19, 2025
+Version: 1.2
+Last Updated: November 20, 2025
+
+Directory Structure:
+    PROC_MODELS/
+    ├── binary/          - Binary LEAK/NOLEAK models
+    │   ├── checkpoints/ - Training state & epoch saves
+    │   └── tuning/      - Optuna optimization results
+    └── multiclass/      - 5-class models (BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED)
+        ├── checkpoints/ - Training state & epoch saves
+        └── tuning/      - Optuna optimization results
+
+Notes:
+    - All model directories are automatically created on first run
+    - Use --fresh flag to delete and recreate all model directories (clean slate)
+    - Fresh mode removes all checkpoints and tuning results for both binary and multiclass
 """
 
 import sys
@@ -57,6 +71,8 @@ import time
 import json
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+from global_config import PROC_MODELS
 
 # ANSI color codes
 CYAN = '\033[96m'
@@ -135,6 +151,65 @@ def apply_tuned_params(cfg, params: Dict[str, Any]):
             print_warning(f"Unknown parameter: {key}")
 
 
+def ensure_directories(fresh: bool = False):
+    """
+    Ensure all required model directories exist.
+    If fresh=True, delete and recreate directories for clean slate.
+    
+    Args:
+        fresh: Whether to delete existing directories first
+    """
+    from pathlib import Path
+    import shutil
+    from global_config import PROC_MODELS, TEMP_DIR
+    
+    base_dir = Path(PROC_MODELS)
+    temp_dir = Path(TEMP_DIR)
+    
+    # Define required directory structure
+    required_dirs = [
+        base_dir / "binary",
+        base_dir / "binary" / "checkpoints",
+        base_dir / "binary" / "tuning",
+        base_dir / "binary" / "tuning" / "plots",
+        base_dir / "multiclass",
+        base_dir / "multiclass" / "checkpoints",
+        base_dir / "multiclass" / "tuning",
+        base_dir / "multiclass" / "tuning" / "plots",
+    ]
+    
+    if fresh:
+        print(f"{YELLOW}Fresh start: Cleaning directories...{RESET}")
+        
+        # Delete binary and multiclass subdirectories (preserve root and any other files)
+        for subdir in ["binary", "multiclass"]:
+            dir_path = base_dir / subdir
+            if dir_path.exists():
+                print(f"  Deleting: {dir_path}")
+                shutil.rmtree(dir_path)
+        
+        # Clean PROC_TEMP directory (delete contents but preserve directory)
+        if temp_dir.exists():
+            print(f"  Cleaning: {temp_dir}")
+            for item in temp_dir.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+        
+        print_success("Model and temp directories cleaned")
+    
+    # Create all required directories
+    print(f"{CYAN}Setting up model directories...{RESET}")
+    for dir_path in required_dirs:
+        dir_path.mkdir(parents=True, exist_ok=True)
+    
+    # Ensure temp directory exists
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    print_success(f"Model directories ready: {base_dir}")
+
+
 def run_dataset_builder() -> bool:
     """
     Build HDF5 datasets from WAV files.
@@ -183,13 +258,14 @@ def run_train_binary(use_tuned: bool = False, fresh: bool = False, continue_trai
         
         start_time = time.time()
         
+        # Ensure directories exist (will be cleaned if fresh=True was set globally)
+        # Note: fresh cleanup happens once in main() before any operations
+        
         # Create binary config
         cfg = dataset_trainer.Config()
         cfg.binary_mode = True
         cfg.num_classes = 2
-        cfg.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS_BINARY")
-        cfg.model_dir.mkdir(parents=True, exist_ok=True)
-        (cfg.model_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        cfg.model_dir = Path(PROC_MODELS) / "binary"
         
         # Configure continual learning if requested
         cfg.continual_learning = continue_training
@@ -202,14 +278,6 @@ def run_train_binary(use_tuned: bool = False, fresh: bool = False, continue_trai
                 print(f"  Checkpoint: {checkpoint_path}")
             print(f"  Reset optimizer: {reset_optimizer}")
             print(f"  Reset scheduler: {reset_scheduler}")
-        
-        # Delete old checkpoint if fresh start requested (conflicts with continue_training)
-        if fresh and not continue_training:
-            checkpoint_file = Path("leak_cnn_multi_BINARY_checkpoint.pth")
-            if checkpoint_file.exists():
-                print(f"{YELLOW}Deleting old checkpoint: {checkpoint_file}{RESET}")
-                checkpoint_file.unlink()
-                print_success("Checkpoint deleted")
         
         # Apply tuned parameters if requested
         if use_tuned:
@@ -256,6 +324,7 @@ def run_train_multi(use_tuned: bool = False, fresh: bool = False, continue_train
         cfg = dataset_trainer.Config()
         cfg.binary_mode = False
         cfg.num_classes = 5
+        cfg.model_dir = Path(PROC_MODELS) / "multiclass"
         
         # Configure continual learning if requested
         cfg.continual_learning = continue_training
@@ -268,14 +337,6 @@ def run_train_multi(use_tuned: bool = False, fresh: bool = False, continue_train
                 print(f"  Checkpoint: {checkpoint_path}")
             print(f"  Reset optimizer: {reset_optimizer}")
             print(f"  Reset scheduler: {reset_scheduler}")
-        
-        # Delete old checkpoint if fresh start requested (conflicts with continue_training)
-        if fresh and not continue_training:
-            checkpoint_file = Path("leak_cnn_multi_checkpoint.pth")
-            if checkpoint_file.exists():
-                print(f"{YELLOW}Deleting old checkpoint: {checkpoint_file}{RESET}")
-                checkpoint_file.unlink()
-                print_success("Checkpoint deleted")
         
         # Apply tuned parameters if requested
         if use_tuned:
@@ -324,7 +385,7 @@ def run_tune_binary(n_trials: int = 50, max_epochs: int = 20, restart: bool = Fa
         tuning_cfg.max_epochs_per_trial = max_epochs
         tuning_cfg.restart = restart
         tuning_cfg.binary_mode = True
-        tuning_cfg.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS_BINARY")
+        tuning_cfg.model_dir = Path(PROC_MODELS) / "binary"
         
         # Delete old study database if fresh start requested
         if fresh:
@@ -373,7 +434,7 @@ def run_tune_multi(n_trials: int = 50, max_epochs: int = 20, restart: bool = Fal
         tuning_cfg.max_epochs_per_trial = max_epochs
         tuning_cfg.restart = restart
         tuning_cfg.binary_mode = False
-        tuning_cfg.model_dir = Path("/DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS")
+        tuning_cfg.model_dir = Path(PROC_MODELS) / "multiclass"
         
         # Delete old study database if fresh start requested
         if fresh:
@@ -658,6 +719,12 @@ For detailed help on individual components:
     # Track overall success
     all_success = True
     overall_start = time.time()
+    
+    # Setup directories first (clean if --fresh flag set)
+    if args.fresh:
+        ensure_directories(fresh=True)
+    else:
+        ensure_directories(fresh=False)
     
     # Execute requested operations in logical order
     

@@ -1,76 +1,66 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Dataset Classifier - PyTorch Leak Detection Inference
 
 High-performance inference script for classifying acoustic leak detection datasets using
-PyTorch models. Supports both single-label and multi-label classification with batch processing.
+PyTorch models. Supports both binary (LEAK/NOLEAK) and multiclass (5-class) models.
 
 Key Features:
+    - Dual model support: --model-binary or --model-multi
     - File-level classification with two-stage temporal segmentation
-    - Multi-label support with configurable thresholds
+    - Multiple decision rules (mean, long_vote, any_long, frac_vote)
     - CSV output with per-class probabilities
     - Batch processing for memory efficiency
     - GPU acceleration with FP16 inference
     - Resume capability (skips already classified files)
 
-Input:
-    - WAV files from INFERENCE/ directory
-    - PyTorch model (best.pth) + metadata (model_meta.json)
+Model Modes:
+    Binary (--model-binary):
+        - 2 classes: LEAK, NOLEAK
+        - Model path: PROC_MODELS/binary/best.pth
+        - Metadata: PROC_MODELS/binary/model_meta.json
+    
+    Multiclass (--model-multi):
+        - 5 classes: BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED
+        - Model path: PROC_MODELS/multiclass/best.pth
+        - Metadata: PROC_MODELS/multiclass/model_meta.json
 
-Output:
-    - classification_report.csv with columns:
-      [filepath, predicted_label, confidence, prob_LEAK, prob_NORMAL, ...]
+Decision Rules:
+    - mean: Average leak prob across all long segments >= threshold
+    - long_vote: Majority of long segments have mean(short) >= threshold (paper-style)
+    - any_long: Any long segment has mean(short) >= threshold → LEAK
+    - frac_vote: Fraction of long segments >= threshold meets --long-frac requirement
 
-Usage:
-    Configure paths in script then run: python dataset_classifier.py
+Probability Modes:
+    - softmax: Use softmax over class logits, take P(LEAK) only
+    - blend: Average 0.5*P_leak_softmax + 0.5*sigmoid(aux_leak)
 
-Note:
-    Uses builder configuration from model_meta.json to ensure feature extraction
-    alignment with training parameters.
-"""
-# -*- coding: utf-8 -*-
-"""
-dataset_classifier_new.py — pragmatic recall-first leak classifier
+CSV Output:
+    filepath,is_leak,leak_conf_mean,per_long_probs_json,long_pos_frac,notes
 
-Highlights
-----------
-• Standalone & explicit: defines its own tiny CNN head (compatible with trainer defaults) and
-  can also load state_dicts from common checkpoint formats: raw state_dict, {"model": ...},
-  DDP "module."-prefixed, or torch.compile "_orig_mod."-prefixed.
-• Robust config discovery:
-    - Reads mel/segmentation parameters from any of the builder HDF5 files under STAGE_DIR
-      (TRAINING/VALIDATION/TESTING_DATASET.H5) via HDF5 attrs["config_json"].
-    - Falls back to sensible defaults matching dataset_builder.py if HDF5 not found.
-• Two-stage segmentation to mirror the paper: long_window → short_window segments.
-• Multiple decision rules that favor recall in inference-only pipelines:
-    - mean         : average leak prob across all *long* segments >= thr
-    - long_vote    : majority of *long* segments have mean(short) >= thr  (paper-style)
-    - any_long     : if any long segment has mean(short) >= thr → LEAK
-    - frac_vote    : fraction of long segments with mean(short) >= thr >= --long-frac
-• Probability heads:
-    - softmax (default): use softmax over class logits, take P(LEAK) only
-    - blend            : if aux leak head exists, average 0.5*P_leak_softmax + 0.5*sigmoid(aux_leak)
-• Sensible defaults to maximize recall safely:
-    --decision frac_vote --long-frac 0.25 --thr 0.35
+Usage Examples:
+    # Binary model (LEAK/NOLEAK)
+    python dataset_classifier.py --model-binary --in-dir /path/to/audio --out leak_report.csv
+    
+    # Multiclass model (5 classes)
+    python dataset_classifier.py --model-multi --in-dir /path/to/audio --out classification.csv
+    
+    # Custom decision rule
+    python dataset_classifier.py --model-binary --in-dir /path/to/audio \\
+        --decision frac_vote --long-frac 0.25 --thr 0.35 --out results.csv
 
-CSV Output
-----------
-filepath,is_leak,leak_conf_mean,per_long_probs_json,long_pos_frac,notes
-
-Usage Example
--------------
-python dataset_classifier_new.py \
-  --stage-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/MASTER_DATASET \
-  --in-dir   /DEVELOPMENT/ROOT_AILH/DATA_STORE/MASTER_DATASET/INFERENCE/LEAK \
-  --prob softmax \
-  --decision frac_vote --long-frac 0.25 --thr 0.35 \
-  --out leak_report.csv
+Author: AI Development Team
+Version: 2.0
+Last Updated: November 20, 2025
 """
 import os, json, csv, math, argparse, sys
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 
 import numpy as np
+
+from global_config import PROC_MODELS, DATASET_TRAINING
 
 try:
     import h5py
@@ -107,14 +97,15 @@ def _coerce_state_dict(obj) -> Dict[str, torch.Tensor]:
     return sd
 
 def _pick_h5_for_config(stage_dir: Path) -> Optional[Path]:
-    for name in ["TRAINING_DATASET.H5","VALIDATION_DATASET.H5","TESTING_DATASET.H5",
-                 "LEAK_DATASET.H5","INCREMENTAL_DATASET.H5"]:
+    """Find first available HDF5 dataset file for config extraction."""
+    for name in ["TRAINING_DATASET.H5", "VALIDATION_DATASET.H5", "TESTING_DATASET.H5"]:
         p = stage_dir / name
         if p.exists():
             return p
     return None
 
 def load_builder_config(stage_dir: Path) -> Dict:
+    """Load builder configuration from HDF5 attrs or use defaults."""
     # Default values aligned with dataset_builder.py
     cfg = {
         "sample_rate": 4096,
@@ -136,17 +127,25 @@ def load_builder_config(stage_dir: Path) -> Dict:
     try:
         with h5py.File(str(h5p), "r") as h:
             if "config_json" in h.attrs:
-                j = json.loads(h.attrs["config_json"])
+                config_val = h.attrs["config_json"]
+                if isinstance(config_val, bytes):
+                    config_str = config_val.decode('utf-8')
+                elif isinstance(config_val, str):
+                    config_str = config_val
+                else:
+                    config_str = str(config_val)
+                j = json.loads(config_str)
                 cfg.update({k: j[k] for k in cfg.keys() if k in j})
     except Exception as e:
         pass
     return cfg
 
-def load_model_meta(stage_dir: Path) -> Dict:
-    md = stage_dir / "MODELS" / "model_meta.json"
+def load_model_meta(model_type: str) -> Dict:
+    """Load model metadata from model_meta.json."""
+    meta_path = Path(PROC_MODELS) / model_type / "model_meta.json"
     meta = {}
     try:
-        with open(md, "r") as f:
+        with open(meta_path, "r") as f:
             meta = json.load(f)
     except Exception:
         pass
@@ -218,12 +217,12 @@ class LeakCNNMulti(nn.Module):
         """
         mel_db: [B, 1, n_mels, t_frames] (channels_last ok)
         """
-        x = F.gelu(self.conv1(mel_db))
-        x = self.pool1(F.gelu(self.conv2(x)))
-        x = self.pool2(F.gelu(self.conv3(x)))
+        x = F.relu(self.conv1(mel_db))
+        x = self.pool1(F.relu(self.conv2(x)))
+        x = self.pool2(F.relu(self.conv3(x)))
         x = self.adapt(x)
         x = torch.flatten(x, 1)
-        x = self.drop(F.gelu(self.fc1(x)))
+        x = self.drop(F.relu(self.fc1(x)))
         return self.cls(x), self.leak(x).squeeze(1)
 
 # ------------------------ Inference helpers ------------------------
@@ -245,35 +244,58 @@ def build_mel(cfg: Dict) -> nn.Module:
         torchaudio.transforms.AmplitudeToDB(stype="power")
     )
 
-def load_weights_and_meta(stage_dir: Path, n_classes: int, device: torch.device) -> Tuple[nn.Module, Dict]:
+def load_weights_and_meta(model_dir: Path, n_classes: int, device: torch.device) -> Tuple[nn.Module, Dict]:
     """
-    Search typical locations under STAGE_DIR/MODELS for weights and meta.
+    Load model weights and metadata from model directory.
+    
+    Args:
+        model_dir: Path to model directory (e.g., PROC_MODELS/binary or PROC_MODELS/multiclass)
+        n_classes: Number of classes (2 for binary, 5 for multiclass)
+        device: PyTorch device
+    
+    Returns:
+        Tuple of (model, metadata_dict)
     """
-    model_dir = stage_dir / "MODELS"
-    candidates = [model_dir/"best.pth", model_dir/"cnn_model_best.h5", model_dir/"cnn_model_full.h5",
-                  Path("best.pth"), Path("cnn_model_best.h5"), Path("cnn_model_full.h5")]
-    meta = load_model_meta(stage_dir)
-    model = LeakCNNMulti(n_classes=n_classes, dropout=0.25).to(device).eval().to(memory_format=torch.channels_last)
-    last_err = None
+    # Try to load metadata
+    meta_path = model_dir / "model_meta.json"
+    meta = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+                print(f"[META] Loaded metadata from {meta_path}")
+        except Exception as e:
+            print(f"[WARN] Could not load metadata: {e}")
+    
+    # Initialize model
+    model = LeakCNNMulti(n_classes=n_classes, dropout=0.25)
+    model = model.to(device)
+    model = model.to(memory_format=torch.channels_last)  # type: ignore[call-overload]
+    model = model.eval()
+    
+    # Try to load weights
+    candidates = [
+        model_dir / "best.pth",
+        model_dir / "checkpoints" / "last.pth",
+    ]
+    
     for ck in candidates:
         if not ck.exists():
             continue
         try:
             obj = torch.load(str(ck), map_location=device, weights_only=False)
-            sd  = _coerce_state_dict(obj)
+            sd = _coerce_state_dict(obj)
             model.load_state_dict(sd, strict=False)
-            print(f"[MODEL] loaded {ck}")
+            print(f"[MODEL] Loaded weights from {ck}")
             return model, meta
         except Exception as e:
-            print(f"[WARN] could not load {ck}: {e}")
-            last_err = e
-    if last_err is not None:
-        print(f"[WARN] no checkpoint could be loaded; using randomly initialized model.", file=sys.stderr)
-    return model, meta
+            print(f"[WARN] Could not load {ck}: {e}")
+    
+    raise FileNotFoundError(f"No valid checkpoint found in {model_dir}")
 
 def infer_one_wav(model: nn.Module, mel_db: nn.Module, wav: np.ndarray, cfg: Dict,
                   device: torch.device, batch_segments: int = 2048,
-                  prob: str = "softmax") -> Tuple[List[float], float]:
+                  prob: str = "softmax", leak_idx: int = 0) -> Tuple[List[float], float]:
     """
     Returns:
       per_long_probs: list[float]   (length = num_long) 
@@ -317,10 +339,10 @@ def decide_label(per_long: List[float], decision: str, thr: float, long_frac: fl
     if len(per_long) == 0:
         return 0, 0.0, 0.0, "no_long_segments"
 
-    per_long = np.asarray(per_long, dtype=np.float32)
-    long_hits = (per_long >= thr).astype(np.float32)
+    per_long_arr = np.asarray(per_long, dtype=np.float32)
+    long_hits = (per_long_arr >= thr).astype(np.float32)
     long_pos_frac = float(long_hits.mean())
-    leak_conf_mean = float(per_long.mean())
+    leak_conf_mean = float(per_long_arr.mean())
 
     notes = []
     if decision == "mean":
@@ -343,99 +365,139 @@ def decide_label(per_long: List[float], decision: str, thr: float, long_frac: fl
 # ------------------------ Main CLI ------------------------
 
 def main():
-    p = argparse.ArgumentParser(description="Recall-first two-stage leak classifier")
-    p.add_argument("--stage-dir", type=str, default="/DEVELOPMENT/DATASET_REFERENCE", help="Dataset stage root")
-    g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--in-dir", type=str, help="Directory of audio files (recursively scanned)")
-    g.add_argument("--filelist", type=str, help="Text file with one audio path per line")
+    p = argparse.ArgumentParser(description="Leak detection inference with binary or multiclass models")
+    
+    # Model selection (mutually exclusive)
+    model_group = p.add_mutually_exclusive_group(required=True)
+    model_group.add_argument("--model-binary", action="store_true", help="Use binary model (LEAK/NOLEAK)")
+    model_group.add_argument("--model-multi", action="store_true", help="Use multiclass model (5 classes)")
+    
+    # Input/output
+    p.add_argument("--stage-dir", type=str, default=None, help="Dataset stage root (default: MASTER_DATASET from global_config)")
+    input_group = p.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--in-dir", type=str, help="Directory of audio files (recursively scanned)")
+    input_group.add_argument("--filelist", type=str, help="Text file with one audio path per line")
     p.add_argument("--out", type=str, default="leak_report.csv", help="Output CSV")
-    p.add_argument("--prob", type=str, default="softmax", choices=["softmax","blend"], help="Probability head")
+    
+    # Inference settings
+    p.add_argument("--prob", type=str, default="softmax", choices=["softmax", "blend"], 
+                   help="Probability head (softmax or blend with aux leak head)")
     p.add_argument("--decision", type=str, default="frac_vote",
-                   choices=["mean","long_vote","any_long","frac_vote"], help="Decision rule")
-    p.add_argument("--long-frac", type=float, default=0.25, help="For frac_vote: required fraction of long segments >= thr")
-    p.add_argument("--min-long", type=int, default=1, help="For frac_vote: require at least N long segments to be positive")
+                   choices=["mean", "long_vote", "any_long", "frac_vote"], help="Decision rule")
+    p.add_argument("--long-frac", type=float, default=0.25, 
+                   help="For frac_vote: required fraction of long segments >= threshold")
+    p.add_argument("--min-long", type=int, default=1, 
+                   help="For frac_vote: require at least N long segments to be positive")
     p.add_argument("--thr", type=float, default=0.35, help="Leak probability threshold (on per-long means)")
     p.add_argument("--batch-segments", type=int, default=2048, help="Short segments per forward micro-batch")
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    
     args = p.parse_args()
-
-    stage_dir = Path(args.stage_dir)
+    
+    # Determine model type and paths
+    if args.model_binary:
+        model_type = "binary"
+        n_classes = 2
+        class_names = ["LEAK", "NOLEAK"]
+    else:  # model_multi
+        model_type = "multiclass"
+        n_classes = 5
+        class_names = ["BACKGROUND", "CRACK", "LEAK", "NORMAL", "UNCLASSIFIED"]
+    
+    model_dir = Path(PROC_MODELS) / model_type
+    stage_dir = Path(args.stage_dir) if args.stage_dir else Path(DATASET_TRAINING)
+    
+    print(f"[CONFIG] Model type: {model_type}")
+    print(f"[CONFIG] Model directory: {model_dir}")
+    print(f"[CONFIG] Stage directory: {stage_dir}")
+    print(f"[CONFIG] Classes: {class_names}")
+    
+    # Load builder config
     cfg = load_builder_config(stage_dir)
     device = torch.device(args.device)
-
-    # build mel transform
+    
+    # Build mel transform
     mel = build_mel(cfg).to(device).eval()
-
-    # Resolve class order: ensure LEAK is at index 0 for softmax route.
-    meta = load_model_meta(stage_dir)
-    class_names = meta.get("class_names") or ["LEAK", "NOLEAK"]
-    if "LEAK" not in class_names:
-        class_names = ["LEAK"] + [c for c in class_names if c != "LEAK"]
+    
+    # Load model and metadata
+    try:
+        model, meta = load_weights_and_meta(model_dir, n_classes=n_classes, device=device)
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Get leak index
     leak_idx = class_names.index("LEAK")
-    n_classes = max(2, len(class_names))
-
-    # Instantiate model & try to load weights from STAGE_DIR/MODELS
-    model, meta2 = load_weights_and_meta(stage_dir, n_classes=n_classes, device=device)
-    meta.update(meta2)
-
-    # If LEAK is not at index 0 in the checkpoint's notion, we will reorder logits during inference.
-    # Easiest: assume LEAK is at index 0 here and warn otherwise.
-    if leak_idx != 0:
-        print(f"[WARN] Expected 'LEAK' at index 0, but it is at {leak_idx}. "
-              f"This script will still index 0 as LEAK; ensure your checkpoint uses that order.", file=sys.stderr)
-
+    if leak_idx != 2 and model_type == "multiclass":  # LEAK should be at index 2 for multiclass
+        print(f"[INFO] LEAK is at index {leak_idx} (expected 2 for multiclass)", file=sys.stderr)
+    
     # Collect files
     if args.in_dir:
         files = list_wavs(Path(args.in_dir))
     else:
         with open(args.filelist, "r") as f:
             files = [Path(line.strip()) for line in f if line.strip()]
+    
     if not files:
-        print("No audio files found.", file=sys.stderr)
+        print("[ERROR] No audio files found.", file=sys.stderr)
         sys.exit(2)
-
+    
     total = len(files)
     leak_ct = 0
-
+    
+    print(f"[INFO] Processing {total} files...")
+    
     # Prepare CSV
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    
     with open(out_path, "w", newline="") as fcsv:
         w = csv.writer(fcsv)
-        w.writerow(["filepath","is_leak","leak_conf_mean","per_long_probs_json","long_pos_frac","notes"])
-
-        for fp in files:
+        w.writerow(["filepath", "is_leak", "leak_conf_mean", "per_long_probs_json", "long_pos_frac", "notes"])
+        
+        for idx, fp in enumerate(files, 1):
             try:
                 wav, sr = read_audio(fp)
                 if sr != int(cfg["sample_rate"]):
                     # resample to cfg SR
+                    if torchaudio is None:
+                        raise RuntimeError("torchaudio required for resampling")
                     wav_t, _ = torchaudio.load(str(fp))
                     wav_t = torchaudio.functional.resample(wav_t, sr, int(cfg["sample_rate"]))
                     wav = wav_t.mean(dim=0).numpy().astype(np.float32)
                     sr = int(cfg["sample_rate"])
-
+                
                 # pad/trim to full duration
                 target = int(cfg["sample_rate"] * cfg["duration_sec"])
                 wav = pad_or_trim(wav, target)
-
+                
                 per_long, leak_mean = infer_one_wav(model, mel, wav, cfg, device,
-                                                    batch_segments=args.batch_segments, prob=args.prob)
+                                                    batch_segments=args.batch_segments, 
+                                                    prob=args.prob, leak_idx=leak_idx)
                 is_leak, leak_conf_mean, long_pos_frac, notes = decide_label(
                     per_long, decision=args.decision, thr=float(args.thr),
                     long_frac=float(args.long_frac), min_long=int(args.min_long)
                 )
-
+                
                 if is_leak:
                     leak_ct += 1
-
-                w.writerow([str(fp), is_leak, f"{leak_conf_mean:.6f}", json.dumps(per_long), f"{long_pos_frac:.6f}", notes])
+                
+                w.writerow([str(fp), is_leak, f"{leak_conf_mean:.6f}", 
+                           json.dumps(per_long), f"{long_pos_frac:.6f}", notes])
+                
+                if idx % 100 == 0:
+                    print(f"[PROGRESS] {idx}/{total} files processed ({leak_ct} leaks detected)")
+                    
             except Exception as e:
                 w.writerow([str(fp), 0, f"0.0", "[]", "0.0", f"error:{type(e).__name__}:{e}"])
+                print(f"[ERROR] Failed to process {fp}: {e}")
+    
+    print(f"\n[DONE] Results written to: {out_path}")
+    print(f"[STATS] Leaks detected: {leak_ct}/{total} ({(leak_ct/total*100.0):.1f}%)")
+    print(f"[STATS] Decision rule: {args.decision}, threshold: {args.thr}, long_frac: {args.long_frac}, min_long: {args.min_long}")
+    print(f"[STATS] Model: {model_type}, SR: {cfg['sample_rate']}Hz, "
+          f"windows: long={cfg['long_window']} short={cfg['short_window']}")
 
-    print(f"[DONE] wrote {out_path} | leaks={leak_ct}/{total} "
-          f"({(leak_ct/total*100.0):.1f}%) using decision={args.decision}, thr={args.thr}, "
-          f"long_frac={args.long_frac}, min_long={args.min_long}")
-    print(f"Stage dir: {stage_dir} | SR={cfg['sample_rate']}Hz | windows long={cfg['long_window']} short={cfg['short_window']}")
 
 if __name__ == "__main__":
     main()
