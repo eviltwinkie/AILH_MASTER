@@ -40,8 +40,11 @@ Usage Examples:
     # Run classification with multi-class model
     python ai_builder.py --classify-multi /path/to/audio/files
     
-    # Full pipeline: build → train → tune
-    python ai_builder.py --build-dataset --train-models --tune-models
+    # Full pipeline: build → tune → train (recommended order)
+    python ai_builder.py --full-pipeline --n_trials 50
+    
+    # Or manually: tune then train with best parameters
+    python ai_builder.py --tune-and-train-binary --n_trials 50 --fresh
 
 Author: AI Development Team
 Version: 1.0
@@ -491,7 +494,7 @@ For detailed help on individual components:
     parser.add_argument(
         '--full-pipeline',
         action='store_true',
-        help='Run complete pipeline: build dataset → train models → tune models'
+        help='Run complete pipeline: build dataset → tune models → train with best params'
     )
     
     # Dataset building
@@ -594,7 +597,7 @@ For detailed help on individual components:
     # Handle full pipeline flag
     if args.full_pipeline:
         print_header("FULL PIPELINE EXECUTION")
-        print(f"{CYAN}Running: Build Dataset → Tune Models → Train with Best Params{RESET}\n")
+        print(f"{CYAN}Running: Build Dataset → Tune → Train with Best Params{RESET}\n")
         args.build_dataset = True
         args.tune_and_train_binary = True
         args.tune_and_train_multi = True

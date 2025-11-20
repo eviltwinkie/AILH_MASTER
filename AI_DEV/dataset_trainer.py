@@ -417,6 +417,12 @@ class Config:
     auto_resume: bool = True            # Auto-resume from last.pth if exists
     keep_last_k: int = 3                # Keep last K epoch checkpoints
 
+    # ========== CONTINUAL LEARNING ==========
+    continual_learning: bool = False    # Continue training from existing checkpoint with new/additional data
+    continual_checkpoint: Optional[str] = None  # Path to checkpoint for continual learning (None=auto-detect)
+    continual_reset_scheduler: bool = False  # Reset learning rate scheduler when continuing
+    continual_reset_optimizer: bool = False  # Reset optimizer state when continuing
+
     # ========== PERFORMANCE PROFILING ==========
     profile_performance: bool = True    # Enable detailed performance profiling
     profile_gpu_util: bool = True       # Monitor GPU utilization during training

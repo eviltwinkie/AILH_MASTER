@@ -126,6 +126,7 @@ class TuningConfig:
         self.preload_to_ram = True
         self.num_workers = 20  # Match optimized training config
         self.prefetch_factor = 48  # Match optimized training config
+        self.persistent_workers = False  # Disable to prevent DataLoader deadlocks during tuning
         
     def setup_dirs(self):
         """Create tuning directories."""
@@ -149,6 +150,7 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
     cfg.preload_to_ram = base_cfg.preload_to_ram
     cfg.num_workers = base_cfg.num_workers
     cfg.prefetch_factor = base_cfg.prefetch_factor
+    cfg.persistent_workers = base_cfg.persistent_workers
     cfg.seed = base_cfg.seed
     
     # === Hyperparameters to optimize ===
@@ -390,6 +392,7 @@ def run_optimization(tuning_cfg: TuningConfig):
     base_cfg.preload_to_ram = tuning_cfg.preload_to_ram
     base_cfg.num_workers = tuning_cfg.num_workers
     base_cfg.prefetch_factor = tuning_cfg.prefetch_factor
+    base_cfg.persistent_workers = tuning_cfg.persistent_workers
     base_cfg.binary_mode = tuning_cfg.binary_mode  # Set binary mode from tuning config
     base_cfg.num_classes = 2 if tuning_cfg.binary_mode else 5
     base_cfg.model_dir = tuning_cfg.model_dir
