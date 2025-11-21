@@ -348,18 +348,18 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                     logger.warning(f"{YELLOW}Trial {trial.number}: Model parameters barely changed! Learning may have failed.{RESET}")
                     # Don't return 0.0 immediately, let it continue to see if it improves
 
-            # Validate (sampled validation for faster tuning)
+            # Validate (use full validation set for accurate F1)
             # CRITICAL: Use model_leak_idx for binary mode (1) instead of leak_idx (2)
             # After BinaryLabelDataset wrapping, labels are 0/1, not 0-4
-            # For tuning, sample 25% of validation set for speed (31 batches instead of 124)
+            # Use full validation to avoid missing LEAK samples (validation is NOT shuffled!)
             val_metrics = eval_split(
                 model=train_model,
                 loader=val_loader,
                 device=device,
                 leak_idx=model_leak_idx,  # FIX: Use model_leak_idx (1 for binary, leak_idx for multi-class)
                 use_channels_last=cfg.use_channels_last,
-                max_batches=40,  # Sample validation (40 batches = ~32% of set, enough for F1 estimate)
-                leak_threshold=0.3  # Lower threshold for imbalanced data
+                max_batches=None,  # Use full validation set (validation is not shuffled, sampling can miss LEAK!)
+                leak_threshold=0.5  # Standard threshold (0.3 was too low for uncertain model outputs)
             )
             
             val_f1 = val_metrics["leak_f1"]
