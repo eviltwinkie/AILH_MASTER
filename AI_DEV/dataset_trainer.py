@@ -1852,6 +1852,18 @@ def eval_split(model: nn.Module,
             if all(std < 0.01 for std in cls_stds):
                 logger.error(f"{RED}  ⚠️  ALL CLASSES HAVE CONSTANT LOGITS! Model completely collapsed{RESET}")
 
+                # Check model weights to diagnose collapse
+                logger.error(f"{RED}[MODEL WEIGHT DIAGNOSTIC] Checking for weight collapse...{RESET}")
+                for name, param in model.named_parameters():  # type: ignore[attr-defined]
+                    if param.requires_grad and 'weight' in name:
+                        w_mean = param.data.abs().mean().item()
+                        w_std = param.data.std().item()
+                        w_max = param.data.abs().max().item()
+                        if w_mean < 0.001 or w_std < 0.001:
+                            logger.error(f"{RED}  {name}: mean={w_mean:.6f}, std={w_std:.6f}, max={w_max:.6f} ← COLLAPSED!{RESET}")
+                        else:
+                            logger.warning(f"{YELLOW}  {name}: mean={w_mean:.6f}, std={w_std:.6f}, max={w_max:.6f}{RESET}")
+
         # Log class prediction distribution
         if pred_count_by_class:
             logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Class Prediction Distribution (first batch):{RESET}")
