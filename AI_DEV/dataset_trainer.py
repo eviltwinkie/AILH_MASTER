@@ -1557,21 +1557,14 @@ def setup_loss_functions(
         cls_loss_fn = FocalLoss(alpha, gamma=cfg.focal_gamma)
     
     # Auxiliary loss (binary leak-vs-rest)
+    # NOTE: pos_weight REMOVED to prevent conflicting class imbalance handling
+    # The classification head already handles imbalance via class weights/focal loss.
+    # Using pos_weight in BOTH losses created a degenerate solution where the model
+    # outputs class prior (~0.44 LEAK) for all samples, minimizing both losses
+    # simultaneously without learning features (constant logit collapse).
     leak_bce = None
     if cfg.use_leak_aux_head:
-        if cfg.leak_aux_pos_weight is not None:
-            bce_pos_weight = torch.tensor([cfg.leak_aux_pos_weight], device=device)
-        else:
-            # Derive from class frequency
-            with h5py.File(ds_tr.h5_path, "r") as f:  # type: ignore[misc]
-                labels = np.asarray(f[HDF5_LABELS_KEY][:], dtype=np.int64)  # type: ignore[index]
-            pos = (labels == leak_idx).sum()
-            neg = max(len(labels) - pos, 1)
-            segs_per_file = ds_tr.num_long * ds_tr.num_short
-            pos *= segs_per_file
-            neg *= segs_per_file
-            bce_pos_weight = torch.tensor([neg / max(pos, 1)], device=device)
-        leak_bce = nn.BCEWithLogitsLoss(pos_weight=bce_pos_weight)
+        leak_bce = nn.BCEWithLogitsLoss()
     
     return cls_loss_fn, leak_bce
 

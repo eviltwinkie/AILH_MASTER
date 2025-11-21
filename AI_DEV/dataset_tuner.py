@@ -171,8 +171,9 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningCo
     cfg.val_batch_size = min(cfg.batch_size * 2, 16384)  # 2x training (validation doesn't need gradients)
     
     # Learning rate (adjusted for batch size - larger batches need higher LR)
+    # Raised minimum from 1e-4 to 3e-4 to avoid getting stuck with weak gradients
     batch_size_factor = cfg.batch_size / 6144  # Normalize to middle batch size (6144)
-    lr_min = 1e-4 * max(1.0, batch_size_factor ** 0.5)  # Scale up min LR with batch size
+    lr_min = 3e-4 * max(1.0, batch_size_factor ** 0.5)  # Scale up min LR with batch size
     lr_max = 1e-2 * max(1.0, batch_size_factor ** 0.5)  # Scale up max LR with batch size
     cfg.learning_rate = trial.suggest_float("learning_rate", lr_min, lr_max, log=True)
     
@@ -193,20 +194,24 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningCo
         cfg.focal_gamma = trial.suggest_float("focal_gamma", 1.0, 3.0, step=0.5)
         cfg.focal_alpha_leak = trial.suggest_float("focal_alpha_leak", 0.5, 0.9, step=0.1)
     
-    # Auxiliary leak head weight (further reduced to prevent aux head dominance)
-    # Trial 0/1 showed: aux loss (0.81) >> cls loss (0.12) even with weight=0.2
-    # This caused 96.5% LEAK predictions when only 44.3% are actual LEAK
-    cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.05, 0.15, step=0.05)
+    # Auxiliary leak head weight (balanced to prevent both collapse modes)
+    # Previous issues:
+    #   - Too strong (0.20+): aux loss dominates → 96.5% LEAK predictions
+    #   - Too weak (0.05-0.15): model outputs constant logits → 0% LEAK predictions
+    # Sweet spot is between these extremes
+    cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.15, 0.30, step=0.05)
 
     # Class balancing (critical for preventing collapse)
     # REMOVED oversample_factor from search - causes LEAK collapse when >1
     # Use class weights only (more stable than oversampling)
     cfg.leak_oversample_factor = 1  # Disable oversampling
-    # Reduced max boost from 3.0 to 2.0 (trial with 2.5 still caused 96.5% LEAK predictions)
-    cfg.leak_weight_boost = trial.suggest_float("leak_weight_boost", 1.0, 2.0, step=0.25)
+    # Narrowed range to middle ground between collapse modes:
+    #   - boost ≥2.0: 96.5% LEAK predictions (too strong)
+    #   - boost ≤1.25: constant 0.5 outputs (too weak)
+    cfg.leak_weight_boost = trial.suggest_float("leak_weight_boost", 1.3, 1.8, step=0.1)
 
-    # Disable warmup for tuning (trials are short, want to see LR effect immediately)
-    cfg.warmup_epochs = 0
+    # Small warmup to stabilize early training (helps prevent early collapse)
+    cfg.warmup_epochs = trial.suggest_int("warmup_epochs", 2, 5)
     
     # Set epochs for tuning (override default 200)
     cfg.epochs = tuning_cfg.max_epochs_per_trial
