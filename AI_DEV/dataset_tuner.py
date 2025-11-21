@@ -211,6 +211,12 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningCo
     #   - boost ≤1.25: constant 0.5 outputs (too weak)
     cfg.leak_weight_boost = trial.suggest_float("leak_weight_boost", 1.3, 1.8, step=0.1)
 
+    # Leak detection threshold (critical for balancing precision vs recall)
+    # Diagnostics show model outputs cluster around 0.43-0.45 (class frequency)
+    # Default threshold=0.5 kills recall (99.6% of leaks missed)
+    # Search lower thresholds to improve recall while maintaining precision
+    cfg.leak_threshold = trial.suggest_float("leak_threshold", 0.35, 0.50, step=0.05)
+
     # Small warmup to stabilize early training (helps prevent early collapse)
     cfg.warmup_epochs = trial.suggest_int("warmup_epochs", 2, 5)
     
@@ -370,7 +376,7 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                 leak_idx=model_leak_idx,  # FIX: Use model_leak_idx (1 for binary, leak_idx for multi-class)
                 use_channels_last=cfg.use_channels_last,
                 max_batches=None,  # Use full validation set (validation is not shuffled, sampling can miss LEAK!)
-                leak_threshold=0.5  # Standard threshold (0.3 was too low for uncertain model outputs)
+                leak_threshold=cfg.leak_threshold  # Tuned threshold for optimal precision/recall balance
             )
             
             val_f1 = val_metrics["leak_f1"]
