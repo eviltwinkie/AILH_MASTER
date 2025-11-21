@@ -343,14 +343,15 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                     logger.warning(f"{YELLOW}Trial {trial.number}: Model parameters barely changed! Learning may have failed.{RESET}")
                     # Don't return 0.0 immediately, let it continue to see if it improves
             
-            # Validate (fast segment-level evaluation for tuning)
+            # Validate (full segment-level evaluation for tuning)
             val_metrics = eval_split(
                 model=train_model,
                 loader=val_loader,
                 device=device,
                 leak_idx=leak_idx,
                 use_channels_last=cfg.use_channels_last,
-                max_batches=5  # Limit to 5 batches for very fast validation
+                max_batches=None,  # Evaluate entire validation set to avoid missing LEAK class
+                leak_threshold=0.3  # Lower threshold for imbalanced data
             )
             
             val_f1 = val_metrics["leak_f1"]

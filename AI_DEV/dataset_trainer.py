@@ -408,9 +408,9 @@ class Config:
     log_dir: Path = Path("/DEVELOPMENT/DATASET_REFERENCE/LOGS")
 
     # ========== TRAINING HYPERPARAMETERS ==========
-    batch_size: int = 32768             # Training batch size (large batch for smooth GPU utilization)
+    batch_size: int = 8192              # Training batch size (reduced for faster iteration, effective=32768 with grad_accum)
     val_batch_size: int = 16384         # Validation batch size (optimized for throughput)
-    grad_accum_steps: int = 1           # Gradient accumulation (1=disabled, incompatible with CUDA Graphs)
+    grad_accum_steps: int = 4           # Gradient accumulation (effective batch size = 8192*4 = 32768)
     epochs: int = 200                   # Maximum training epochs
     warmup_epochs: int = 3              # Linear LR warmup epochs before scheduler
     learning_rate: float = 1e-3         # Initial learning rate for AdamW
@@ -437,8 +437,8 @@ class Config:
     leak_oversample_factor: int = 2     # Duplicate LEAK segments N times (1=disabled)
 
     # ========== DATALOADER CONFIGURATION ==========
-    num_workers: int = 20               # Parallel data loading workers (maximized for throughput)
-    prefetch_factor: int = 48           # Batches to prefetch per worker (extreme prefetch for smooth GPU feeding)
+    num_workers: int = 12               # Parallel data loading workers (reduced to prevent GPU stuttering)
+    prefetch_factor: int = 4            # Batches to prefetch per worker (optimized for smooth GPU feeding)
     persistent_workers: bool = True     # Keep workers alive between epochs
     pin_memory: bool = True             # Pin memory for faster GPU transfer
     preload_to_ram: bool = True         # Preload entire dataset to RAM (requires ~8GB, eliminates I/O)
@@ -1693,7 +1693,8 @@ def eval_split(model: nn.Module,
                device: torch.device,
                leak_idx: int,
                use_channels_last: bool,
-               max_batches: Optional[int] = None) -> Dict[str, float]:
+               max_batches: Optional[int] = None,
+               leak_threshold: float = 0.3) -> Dict[str, float]:
     """Evaluate model on segment-level data.
 
     Args:
@@ -1703,6 +1704,7 @@ def eval_split(model: nn.Module,
         leak_idx: Index of leak class
         use_channels_last: Whether to use channels_last memory format
         max_batches: Maximum number of batches to evaluate (for fast tuning)
+        leak_threshold: Threshold for leak detection (default: 0.3 for imbalanced data)
 
     Returns:
         Dictionary with loss, accuracy, and leak metrics
@@ -1731,8 +1733,8 @@ def eval_split(model: nn.Module,
             preds = logits.argmax(dim=1)
             correct_count += (preds == labels).sum()  # Keep on GPU
 
-            # Compute leak predictions directly
-            leak_preds = (torch.sigmoid(leak_logit) >= 0.5).float()
+            # Compute leak predictions using configurable threshold (lower for imbalanced data)
+            leak_preds = (torch.sigmoid(leak_logit) >= leak_threshold).float()
             leak_targets = (labels == leak_idx).float()
 
             # Accumulate confusion matrix on CPU
@@ -2793,7 +2795,8 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
             use_ta, time_mask, freq_mask, interrupted, sys_monitor, profiler
         )
 
-        metrics = eval_split(model, val_loader, device, leak_idx, cfg.use_channels_last)
+        metrics = eval_split(model, val_loader, device, leak_idx, cfg.use_channels_last,
+                            max_batches=None, leak_threshold=0.3)
         val_loss = metrics["loss"]
         val_acc = metrics["acc"]
         seg_leak_f1 = metrics.get("leak_f1", -1.0)
@@ -2812,13 +2815,15 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
                    seg_leak_f1, val_file_acc, file_leak_f1, file_leak_p, file_leak_r)
 
         # LR scheduling with optional warmup
+        # Always step scheduler to keep state consistent
+        scheduler.step()
+
+        # Apply warmup scaling on top of scheduler if still in warmup period
         if cfg.warmup_epochs > 0 and epoch <= cfg.warmup_epochs:
             warmup_factor = epoch / float(max(1, cfg.warmup_epochs))
             for pg in optimizer.param_groups:
-                pg['lr'] = cfg.learning_rate * warmup_factor
+                pg['lr'] = pg['lr'] * warmup_factor
             logger.debug("Warmup LR epoch %d: factor=%.3f, lr=%.6e", epoch, warmup_factor, optimizer.param_groups[0]['lr'])
-        else:
-            scheduler.step()
         
         save_checkpoint(
             cfg, epoch, model, optimizer, scheduler, scaler, train_sampler,
