@@ -193,12 +193,14 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningCo
         cfg.focal_gamma = trial.suggest_float("focal_gamma", 1.0, 3.0, step=0.5)
         cfg.focal_alpha_leak = trial.suggest_float("focal_alpha_leak", 0.5, 0.9, step=0.1)
     
-    # Auxiliary leak head weight
-    cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.2, 0.6, step=0.1)
+    # Auxiliary leak head weight (reduced range to prevent collapse)
+    cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.1, 0.3, step=0.1)
 
     # Class balancing (critical for preventing collapse)
-    cfg.leak_oversample_factor = trial.suggest_categorical("leak_oversample_factor", [1, 2])
-    cfg.leak_weight_boost = trial.suggest_float("leak_weight_boost", 1.5, 4.0, step=0.5)
+    # REMOVED oversample_factor from search - causes LEAK collapse when >1
+    # Use class weights only (more stable than oversampling)
+    cfg.leak_oversample_factor = 1  # Disable oversampling
+    cfg.leak_weight_boost = trial.suggest_float("leak_weight_boost", 1.5, 3.0, step=0.5)
 
     # Disable warmup for tuning (trials are short, want to see LR effect immediately)
     cfg.warmup_epochs = 0
