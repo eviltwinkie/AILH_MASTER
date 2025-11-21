@@ -408,9 +408,9 @@ class Config:
     log_dir: Path = Path("/DEVELOPMENT/DATASET_REFERENCE/LOGS")
 
     # ========== TRAINING HYPERPARAMETERS ==========
-    batch_size: int = 8192              # Training batch size (reduced for faster iteration, effective=32768 with grad_accum)
+    batch_size: int = 8192              # Training batch size (reduced for faster iteration and less GPU stuttering)
     val_batch_size: int = 16384         # Validation batch size (optimized for throughput)
-    grad_accum_steps: int = 4           # Gradient accumulation (effective batch size = 8192*4 = 32768)
+    grad_accum_steps: int = 1           # Gradient accumulation (1=disabled, incompatible with CUDA Graphs)
     epochs: int = 200                   # Maximum training epochs
     warmup_epochs: int = 3              # Linear LR warmup epochs before scheduler
     learning_rate: float = 1e-3         # Initial learning rate for AdamW
