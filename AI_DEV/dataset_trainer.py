@@ -428,6 +428,7 @@ class Config:
     focal_alpha_leak: float = 0.75      # Focal loss weight for leak class (others: (1-α)/(C-1))
     # Extra emphasis for leak class in binary weighted CE
     leak_weight_boost: float = 2.5      # Multiplier for LEAK class weight in binary weighted CE (reduced from 5.0 to prevent LEAK collapse)
+    leak_threshold: float = 0.40        # Probability threshold for LEAK detection (default 0.40, tunable via hyperparameter search)
 
     # ========== AUXILIARY LEAK DETECTION HEAD ==========
     use_leak_aux_head: bool = True      # Enable binary leak-vs-rest auxiliary head
@@ -3152,7 +3153,7 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
         # CRITICAL: Use model_leak_idx for binary mode (1) instead of leak_idx (2)
         # After BinaryLabelDataset wrapping, labels are 0/1, not 0-4
         metrics = eval_split(model, val_loader, device, model_leak_idx, cfg.use_channels_last,
-                            max_batches=None, leak_threshold=0.3)
+                            max_batches=None, leak_threshold=cfg.leak_threshold)
         val_loss = metrics["loss"]
         val_acc = metrics["acc"]
         seg_leak_f1 = metrics.get("leak_f1", -1.0)
