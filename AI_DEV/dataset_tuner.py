@@ -125,8 +125,8 @@ class TuningConfig:
         
         # Fixed dataset params (use optimized settings from training)
         self.preload_to_ram = True
-        self.num_workers = 8   # Reduced for tuning (fewer workers = faster startup)
-        self.prefetch_factor = 4  # Lower for tuning (trials are short, don't need aggressive prefetch)
+        self.num_workers = 12   # Increased for better GPU utilization
+        self.prefetch_factor = 12  # Increased to keep GPU fed
         self.persistent_workers = True  # Enable for multiple epochs per trial
     
     @property
@@ -166,8 +166,8 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningCo
     
     # === Hyperparameters to optimize ===
     
-    # Batch size first (needed for LR scaling) - smaller for smooth GPU utilization
-    cfg.batch_size = trial.suggest_categorical("batch_size", [4096, 6144, 8192])
+    # Batch size first (needed for LR scaling) - larger for better GPU utilization
+    cfg.batch_size = trial.suggest_categorical("batch_size", [4096, 6144, 8192, 10240])
     cfg.val_batch_size = min(cfg.batch_size * 2, 16384)  # 2x training (validation doesn't need gradients)
     
     # Learning rate (adjusted for batch size - larger batches need higher LR)
@@ -194,12 +194,13 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningCo
         cfg.focal_gamma = trial.suggest_float("focal_gamma", 1.0, 3.0, step=0.5)
         cfg.focal_alpha_leak = trial.suggest_float("focal_alpha_leak", 0.5, 0.9, step=0.1)
     
-    # Auxiliary leak head weight (balanced to prevent both collapse modes)
-    # Previous issues:
-    #   - Too strong (0.20+): aux loss dominates → 96.5% LEAK predictions
-    #   - Too weak (0.05-0.15): model outputs constant logits → 0% LEAK predictions
-    # Sweet spot is between these extremes
-    cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.15, 0.30, step=0.05)
+    # Auxiliary leak head weight (very conservative to prevent oscillation)
+    # Diagnostic evidence shows even weight=0.25 causes training/validation oscillation:
+    #   - Training batch 0: 98.8% LEAK predictions (chasing aux head gradient)
+    #   - Validation: 0% LEAK predictions (collapsed to class prior)
+    # Aux loss magnitude (~0.72) >> cls loss (~0.12), so even low weights dominate
+    # Reducing to [0.05, 0.15] to let classification head lead training
+    cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.05, 0.15, step=0.05)
 
     # Class balancing (critical for preventing collapse)
     # REMOVED oversample_factor from search - causes LEAK collapse when >1
