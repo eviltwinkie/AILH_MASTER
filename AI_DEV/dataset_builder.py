@@ -231,7 +231,7 @@ class Config:
     # Add parent directory to sys.path
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
-    from global_config import MASTER_DATASET, DATASET_TRAINING, DATASET_VALIDATION, DATASET_TESTING
+    from global_config import MASTER_DATASET, DATASET_TRAINING, DATASET_VALIDATION, DATASET_TESTING, N_MELS, N_FFT, HOP_LENGTH, SAMPLE_RATE, SAMPLE_DURATION, LONG_WINDOW, SHORT_WINDOW, N_POWER
 
     # Roots
     stage_dir: Path = Path(MASTER_DATASET)
@@ -245,11 +245,11 @@ class Config:
     testing_hdf5: str = "TESTING_DATASET.H5"
 
     # Signal params
-    sample_rate: int = 4096
-    duration_sec: int = 10
+    sample_rate: int = SAMPLE_RATE
+    duration_sec: int = SAMPLE_DURATION
 
-    long_window: int = 1024
-    short_window: int = 512
+    long_window: int = LONG_WINDOW
+    short_window: int = SHORT_WINDOW
 
     # ---- CNN config (requested) ----
     CNN_MODEL_TYPE: str = "mel"
@@ -264,10 +264,10 @@ class Config:
     CNN_DENSE: int = 128
 
     # Mel params (aligned with trainer)
-    n_mels: int = 64
-    n_fft: int = 512
-    hop_length: int = 128
-    power: float = 1.0
+    n_mels: int = N_MELS
+    n_fft: int = N_FFT
+    hop_length: int = HOP_LENGTH
+    power: float = N_POWER
     center: bool = False
 
     # Disk I/O (optimized for NVMe SSD sequential reads)

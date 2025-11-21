@@ -55,7 +55,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 SAMPLE_RATE = 4096
 SAMPLE_UPSCALE = 8192
-SAMPLE_LENGTH_SEC = 10
+SAMPLE_DURATION = 10
 
 CPU_COUNT = os.cpu_count() or 1
 
@@ -67,12 +67,13 @@ RAM_QUEUE_SIZE = 128
 DELIMITER = '~'
 DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
 
-LONG_SEGMENT_SCALE_SEC = 0.25
-SHORT_SEGMENT_POINTS = 512
+LONG_WINDOW = 1024
+SHORT_WINDOW = 512
 
-N_FFT = SHORT_SEGMENT_POINTS # typically set equal to short segment length           
-N_MELS = 32            
+N_FFT = SHORT_WINDOW # typically set equal to short segment length           
+N_MELS = 64            
 HOP_LENGTH = 128
+N_POWER = 1.0
 
 # CNN Training Hyperparameters (Legacy defaults for reference only)
 # NOTE: Actual training uses Optuna-tuned values from PROC_MODELS/{binary,multiclass}/tuning/best_params.json

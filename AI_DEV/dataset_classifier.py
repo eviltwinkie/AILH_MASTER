@@ -60,7 +60,7 @@ from pathlib import Path
 
 import numpy as np
 
-from global_config import PROC_MODELS, DATASET_TRAINING
+from global_config import PROC_MODELS, DATASET_TRAINING, LONG_WINDOW, SHORT_WINDOW, SAMPLE_RATE, SAMPLE_DURATION, N_MELS, N_FFT, HOP_LENGTH, N_POWER
 
 try:
     import h5py
@@ -108,14 +108,14 @@ def load_builder_config(stage_dir: Path) -> Dict:
     """Load builder configuration from HDF5 attrs or use defaults."""
     # Default values aligned with dataset_builder.py
     cfg = {
-        "sample_rate": 4096,
-        "duration_sec": 10,
-        "long_window": 1024,
-        "short_window": 512,
-        "n_mels": 64,
-        "n_fft": 512,
-        "hop_length": 128,
-        "power": 1.0,
+        "sample_rate": SAMPLE_RATE,
+        "duration_sec": SAMPLE_DURATION,
+        "long_window": LONG_WINDOW,
+        "short_window": SHORT_WINDOW,
+        "n_mels": N_MELS,
+        "n_fft": N_FFT,
+        "hop_length": HOP_LENGTH,
+        "power": N_POWER,
         "center": False
     }
     if h5py is None:

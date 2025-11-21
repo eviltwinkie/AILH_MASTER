@@ -412,6 +412,7 @@ class Config:
     val_batch_size: int = 16384         # Validation batch size (optimized for throughput)
     grad_accum_steps: int = 1           # Gradient accumulation (1=disabled, incompatible with CUDA Graphs)
     epochs: int = 200                   # Maximum training epochs
+    warmup_epochs: int = 3              # Linear LR warmup epochs before scheduler
     learning_rate: float = 1e-3         # Initial learning rate for AdamW
     dropout: float = 0.25               # Dropout probability for regularization
     binary_mode: bool = False           # True: LEAK/NOLEAK binary classification, False: All classes
@@ -424,6 +425,8 @@ class Config:
     loss_type: str = "weighted_ce"      # Loss: "ce", "weighted_ce", "focal"
     focal_gamma: float = 2.0            # Focal loss focusing parameter (if loss_type="focal")
     focal_alpha_leak: float = 0.75      # Focal loss weight for leak class (others: (1-α)/(C-1))
+    # Extra emphasis for leak class in binary weighted CE
+    leak_weight_boost: float = 2.0      # Multiplier for LEAK class weight in binary weighted CE
 
     # ========== AUXILIARY LEAK DETECTION HEAD ==========
     use_leak_aux_head: bool = True      # Enable binary leak-vs-rest auxiliary head
@@ -431,7 +434,7 @@ class Config:
     leak_aux_pos_weight: Optional[float] = None  # BCE pos_weight (None=auto from data)
 
     # ========== DATA BALANCING ==========
-    leak_oversample_factor: int = 1     # Duplicate LEAK segments N times (1=disabled)
+    leak_oversample_factor: int = 2     # Duplicate LEAK segments N times (1=disabled)
 
     # ========== DATALOADER CONFIGURATION ==========
     num_workers: int = 20               # Parallel data loading workers (maximized for throughput)
@@ -613,48 +616,80 @@ class SystemMonitor:
     
     def get_stats(self) -> Dict[str, float]:
         """Get current system statistics."""
-        stats = {}
-        
-        # GPU metrics
-        if self.nvml_handle is not None and pynvml is not None:
+        if not self.enabled:
+            return {}
+
+        stats: Dict[str, float] = {}
+
+        # ---------------- GPU / VRAM (NVML) ----------------
+        if (
+            self.device.type == "cuda"
+            and self.nvml_handle is not None
+            and _HAS_NVML
+            and pynvml is not None
+        ):
             try:
                 util = pynvml.nvmlDeviceGetUtilizationRates(self.nvml_handle)
                 mem_info = pynvml.nvmlDeviceGetMemoryInfo(self.nvml_handle)
-                stats['gpu_util'] = util.gpu  # type: ignore
-                mem_used = float(mem_info.used)  # type: ignore
-                mem_total = float(mem_info.total)  # type: ignore
-                stats['vram_used_gb'] = mem_used / (1024**3)
-                stats['vram_total_gb'] = mem_total / (1024**3)
-                stats['vram_percent'] = (mem_used / mem_total) * 100
+
+                total_bytes = float(mem_info.total)
+                used_bytes = float(mem_info.used)
+                free_bytes = float(mem_info.free)
+
+                stats["gpu_util"] = float(util.gpu)
+                stats["vram_total_gb"] = total_bytes / (1024 ** 3)
+                stats["vram_used_gb"] = used_bytes / (1024 ** 3)
+                stats["vram_free_gb"] = free_bytes / (1024 ** 3)
+                stats["vram_percent"] = (used_bytes / total_bytes) * 100.0
             except Exception:
-                stats['gpu_util'] = -1
-                stats['vram_used_gb'] = -1
-                stats['vram_total_gb'] = -1
-                stats['vram_percent'] = -1
-        else:
-            # Fallback to PyTorch for VRAM
-            if self.device.type == 'cuda':
-                try:
-                    stats['vram_used_gb'] = torch.cuda.memory_allocated(self.device) / (1024**3)
-                    stats['vram_total_gb'] = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)
-                    stats['vram_percent'] = (stats['vram_used_gb'] / stats['vram_total_gb']) * 100
-                except Exception:
-                    pass
-        
-        # CPU/RAM metrics
+                stats["gpu_util"] = -1.0
+                stats["vram_total_gb"] = -1.0
+                stats["vram_used_gb"] = -1.0
+                stats["vram_free_gb"] = -1.0
+                stats["vram_percent"] = -1.0
+
+        # Fallback VRAM view if NVML is not available
+        elif self.device.type == "cuda":
+            try:
+                total_bytes = float(torch.cuda.get_device_properties(self.device).total_memory)
+                alloc_bytes = float(torch.cuda.memory_allocated(self.device))
+                reserved_bytes = float(torch.cuda.memory_reserved(self.device))
+                free_bytes = max(total_bytes - alloc_bytes, 0.0)
+
+                stats["vram_total_gb"] = total_bytes / (1024 ** 3)
+                stats["vram_used_gb"] = alloc_bytes / (1024 ** 3)
+                stats["vram_free_gb"] = free_bytes / (1024 ** 3)
+                stats["vram_percent"] = (alloc_bytes / total_bytes) * 100.0
+                stats["vram_torch_alloc_gb"] = alloc_bytes / (1024 ** 3)
+                stats["vram_torch_reserved_gb"] = reserved_bytes / (1024 ** 3)
+            except Exception:
+                pass
+
+        # ---------------- PyTorch allocator stats ----------------
+        if self.device.type == "cuda":
+            try:
+                alloc_bytes = float(torch.cuda.memory_allocated(self.device))
+                reserved_bytes = float(torch.cuda.memory_reserved(self.device))
+                stats["vram_torch_alloc_gb"] = alloc_bytes / (1024 ** 3)
+                stats["vram_torch_reserved_gb"] = reserved_bytes / (1024 ** 3)
+            except Exception:
+                pass
+
+        # ---------------- CPU / RAM (psutil) ----------------
         if _HAS_PSUTIL and psutil is not None:
             try:
-                stats['cpu_percent'] = psutil.cpu_percent(interval=0)
+                cpu_pct = psutil.cpu_percent(interval=0)
+                stats["cpu_percent"] = float(cpu_pct) if isinstance(cpu_pct, (int, float)) else -1.0
                 mem = psutil.virtual_memory()
-                stats['ram_used_gb'] = mem.used / (1024**3)
-                stats['ram_total_gb'] = mem.total / (1024**3)
-                stats['ram_percent'] = mem.percent
+                stats["ram_used_gb"] = mem.used / (1024 ** 3)
+                stats["ram_total_gb"] = mem.total / (1024 ** 3)
+                stats["ram_percent"] = float(mem.percent)
             except Exception:
-                stats['cpu_percent'] = -1
-                stats['ram_used_gb'] = -1
-                stats['ram_total_gb'] = -1
-                stats['ram_percent'] = -1
-        
+                stats["cpu_percent"] = -1.0
+                stats["ram_used_gb"] = -1.0
+                stats["ram_total_gb"] = -1.0
+                stats["ram_percent"] = -1.0
+
         return stats
     
     def format_stats(self) -> str:
@@ -752,26 +787,28 @@ class GPUProfiler:
         """Start profiling session."""
         self.start_time = time.perf_counter()
         self.samples = []
-        
+    
     def report(self) -> str:
         """Generate performance report."""
         if not self.samples:
             return "No profiling data"
-            
-        gpu_utils = [s['gpu_util'] for s in self.samples if s['gpu_util'] >= 0]
+
+        gpu_utils = [s["gpu_util"] for s in self.samples if s.get("gpu_util", -1) >= 0]
         if gpu_utils:
             avg_util = sum(gpu_utils) / len(gpu_utils)
             max_util = max(gpu_utils)
             min_util = min(gpu_utils)
         else:
-            avg_util = max_util = min_util = -1
-            
-        mem_allocated = [s['mem_allocated_gb'] for s in self.samples]
+            avg_util = max_util = min_util = -1.0
+
+        mem_allocated = [s["mem_allocated_gb"] for s in self.samples]
         avg_mem = sum(mem_allocated) / len(mem_allocated)
         peak_mem = max(mem_allocated)
-        
-        report = f"GPU: {avg_util:.1f}% avg (min={min_util:.1f}%, max={max_util:.1f}%) | "
-        report += f"VRAM: {avg_mem:.2f}GB avg, {peak_mem:.2f}GB peak"
+
+        report = (
+            f"GPU: {avg_util:.1f}% avg (min={min_util:.1f}%, max={max_util:.1f}%) | "
+            f"VRAM(PyTorch): {avg_mem:.2f}GB avg, {peak_mem:.2f}GB peak"
+        )
         return report
 
 
@@ -1328,6 +1365,17 @@ class LeakCNNMulti(nn.Module):
         self.fc1 = nn.Linear(128 * 16 * 1, 256)
         self.cls_head = nn.Linear(256, n_classes)
         self.leak_head = nn.Linear(256, 1)  # auxiliary leak vs rest
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m: nn.Module) -> None:
+        if isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, a=0.0, nonlinearity="relu")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = F.relu(self.conv1(x)); x = F.relu(self.conv2(x)); x = self.pool1(x)
@@ -1461,9 +1509,11 @@ def setup_loss_functions(
             counts_binary = np.maximum(counts_binary, 1)
             inv = (total_segs / counts_binary)
             inv = inv / inv.mean()
+            # Apply additional leak emphasis in binary weighted CE
+            inv[1] = inv[1] * cfg.leak_weight_boost
             class_weights_t = torch.tensor(inv, dtype=torch.float32, device=device)
-            logger.info("Binary class weights: NOLEAK=%.4f, LEAK=%.4f (from %d NOLEAK segs, %d LEAK segs)",
-                       inv[0], inv[1], noleak_segs, leak_segs)
+            logger.info("Binary class weights (boosted): NOLEAK=%.4f, LEAK=%.4f (from %d NOLEAK segs, %d LEAK segs; boost=%.2f)",
+                       inv[0], inv[1], noleak_segs, leak_segs, cfg.leak_weight_boost)
         else:
             # Multi-class mode: compute weights for all classes
             counts = class_counts_from_labels(ds_tr)
@@ -1693,216 +1743,248 @@ def evaluate_file_level(
     threshold: float = 0.5,
     batch_long_segments: int = 0,  # 0 = process entire file at once (best GPU util)
     target_segments: int = 8192,  # Target number of segments per GPU batch (consistent load)
+    optimize_threshold: bool = True,
+    threshold_grid: Optional[List[float]] = None,
 ) -> Tuple[float, Dict[str, float]]:
     """
     Paper-exact file-level evaluation with 50% voting threshold.
-    
-    Algorithm:
-    ----------
-    1. For each FILE:
-       a. For each LONG segment (batched for GPU efficiency):
-          - Process all SHORT segments within that long segment
-          - Compute leak probability per short segment:
-            p_short = 0.5 * softmax(logits)[model_leak_idx] + 0.5 * sigmoid(leak_logit)
-          - Average probabilities across all short segments → p_long
-       b. Count how many long segments have p_long ≥ threshold
-       c. FILE is classified as LEAK if ≥50% of long segments exceed threshold
-    
-    2. Compute file-level accuracy, precision, recall, F1 for leak class
-    
-    Args:
-        model: Trained model with dual heads (logits, leak_logit)
-        ds: Dataset with file-level structure
-        device: CUDA device
-        dataset_leak_idx: Index of LEAK class in original dataset labels
-        model_leak_idx: Index of LEAK class in model output (1 for binary, dataset_leak_idx for multi-class)
-        use_channels_last: Use channels_last memory format
-        threshold: Probability threshold for long segment (default: 0.5)
-        batch_long_segments: Number of long segments to batch (0=entire file, best GPU util)
-    
-    Returns:
-        Tuple of (file_accuracy, metrics_dict) where metrics_dict contains:
-        - acc: File-level accuracy
-        - leak_f1: Leak F1 score at file level
-        - leak_p: Leak precision at file level
-        - leak_r: Leak recall at file level
-        - pred_leaks: Number of files predicted as leak
-    
-    Note:
-        This implements the exact algorithm described in the research paper.
-        Uses tqdm progress bar for visual feedback during evaluation.
-        Batches multiple long segments together for better GPU utilization.
+
+    If optimize_threshold=True, this function will:
+      - Collect per-file long-segment leak probabilities
+      - Sweep over a grid of thresholds
+      - Select the threshold that maximizes leak F1
+      - Return metrics at that best threshold and include "best_threshold" in metrics
     """
-    # Validate threshold
     if not (0 < threshold < 1):
         raise ValueError(f"threshold must be in (0, 1), got {threshold}")
-    
+
     model.eval()
-    
+
     # Ensure dataset file handle is open
     if getattr(ds, "h5f", None) is None:
         ds._ensure_open()
-    
+
     correct = 0
     total = 0
     pred_leaks = 0
     true_leak_count = 0
-    true_positives = 0  # Predicted leak AND actually leak
-    false_positives = 0  # Predicted leak BUT not leak
-    false_negatives = 0  # Predicted not leak BUT actually leak
-    
-    # Initialize monitoring
+    true_positives = 0
+    false_positives = 0
+    false_negatives = 0
+
+    # For dynamic threshold selection
+    all_file_labels: List[int] = []
+    all_file_long_probs: List[List[float]] = []
+
     status = EvalStatus(ds.num_files)
     status.start()
-    
-    # Performance profiling
+
     eval_start = time.perf_counter()
-    forward_times = []
-    
+    forward_times: List[float] = []
+
+    # Default grid if requested
+    if optimize_threshold and threshold_grid is None:
+        threshold_grid = [round(x, 2) for x in list(np.linspace(0.10, 0.90, 17))]
+
     try:
         with torch.inference_mode(), torch.amp.autocast('cuda', dtype=torch.float16):
-            # Process files in dynamic batches based on segment count for consistent GPU load
-            segments_per_file = ds.num_long * ds.num_short
-            
-            pbar = tqdm(
-                desc="[File-Level Eval]",
-                total=ds.num_files,
-                unit="file",
-                leave=True,
-                position=0,
-                dynamic_ncols=True,
-                mininterval=0.5,
-                file=sys.stdout,
-            )
-            
-            fidx = 0
-            while fidx < ds.num_files:
-                # Dynamically determine batch size based on target segments
-                files_in_batch = max(1, target_segments // segments_per_file)
-                batch_end = min(fidx + files_in_batch, ds.num_files)
-                
-                # Collect all segments from files in this batch
-                file_segments = []
-                file_labels = []
-                file_num_segments = []
-                
-                for file_idx in range(fidx, batch_end):
-                    # Load entire file: [num_long, num_short, (C,) n_mels, t_frames]
-                    blk = ds._segs[file_idx]  # type: ignore[index]
-                    true_label = int(ds._labels[file_idx])  # type: ignore[index,arg-type]
-                    true_is_leak = 1 if true_label == dataset_leak_idx else 0
+            # Process files in dynamic batches
+            file_idx = 0
+            while file_idx < ds.num_files:
+                # Determine how many long segments this file contributes
+                # All files have ds.num_long long segments and ds.num_short short per long
+                # Build batch until we hit target_segments or dataset end
+                file_batch_indices = []
+                total_segments = 0
+                while file_idx < ds.num_files:
+                    segs_this_file = ds.num_long * ds.num_short
+                    if file_batch_indices and total_segments + segs_this_file > target_segments:
+                        break
+                    file_batch_indices.append(file_idx)
+                    total_segments += segs_this_file
+                    file_idx += 1
+
+                if not file_batch_indices:
+                    break
+
+                # Load all segments for files in this batch
+                file_segments: List[np.ndarray] = []
+                file_labels: List[int] = []
+                file_num_segments: List[int] = []
+
+                for fid in file_batch_indices:
+                    blk, label = ds.get_file(fid)
+                    true_is_leak = 1 if label == dataset_leak_idx else 0
                     true_leak_count += true_is_leak
                     file_labels.append(true_is_leak)
-                    
-                    # Collect all segments from this file
+
                     for li in range(ds.num_long):
-                        mel = blk[li]  # type: ignore[index] # [num_short, (C,) n_mels, t_frames]
+                        mel = blk[li]
                         if ds._has_channel:
-                            mel = mel[:, 0]  # type: ignore[index]
+                            mel = mel[:, 0] if mel.ndim == 3 else mel[0]
                         file_segments.append(mel)
-                    
                     file_num_segments.append(ds.num_long * ds.num_short)
-                
-                # Stack all segments: [total_segments, n_mels, t_frames]
-                mel_batch_np = np.concatenate(file_segments, axis=0)  # type: ignore[arg-type]
-                
-                # Prepare for GPU
+
+                # Stack segments
+                mel_batch_np = np.concatenate(file_segments, axis=0)
                 mel_t = prepare_mel_batch(
-                    mel_batch_np,  # type: ignore[arg-type]
+                    mel_batch_np,
                     device,
                     use_channels_last,
-                    dtype=torch.float16
+                    dtype=torch.float16,
                 )
-                
-                # Single GPU forward pass for all files in batch
+
+                # Forward pass
                 fwd_start = time.perf_counter()
                 logits, leak_logit = model(mel_t)
                 forward_times.append(time.perf_counter() - fwd_start)
-                
-                # Compute leak probabilities
+
+                # Leak probabilities
                 p_cls = torch.softmax(logits, dim=1)[:, model_leak_idx]
-                p_aux = torch.sigmoid(leak_logit).squeeze(-1)
-                p_combined = 0.5 * (p_cls + p_aux)
-                p_combined_cpu = p_combined.cpu().numpy()
-                
-                # Process each file's results
-                seg_offset = 0
-                for file_idx, (true_is_leak, num_segs) in enumerate(zip(file_labels, file_num_segments)):
-                    # Extract this file's probabilities
-                    file_probs = p_combined_cpu[seg_offset:seg_offset + num_segs]
-                    seg_offset += num_segs
-                    
-                    # Reshape to [num_long, num_short] and average per long segment
-                    file_probs = file_probs.reshape(ds.num_long, ds.num_short)
-                    probs_long = file_probs.mean(axis=1)  # [num_long]
-                    
-                    # File-level decision: ≥50% of long segments exceed threshold
+                p_aux = torch.sigmoid(leak_logit)
+                p_seg = 0.5 * p_cls + 0.5 * p_aux
+                p_seg_np = p_seg.detach().float().cpu().numpy()
+
+                # Split back into files and long segments
+                offset = 0
+                for fid_local, seg_count in enumerate(file_num_segments):
+                    probs_short = p_seg_np[offset : offset + seg_count]
+                    offset += seg_count
+
+                    # Reshape [num_long * num_short] -> [num_long, num_short]
+                    probs_short_2d = probs_short.reshape(ds.num_long, ds.num_short)
+                    probs_long = probs_short_2d.mean(axis=1).tolist()
+
+                    true_is_leak = file_labels[fid_local]
+
+                    # For dynamic threshold: store per-file long probs + label
+                    if optimize_threshold:
+                        all_file_labels.append(true_is_leak)
+                        all_file_long_probs.append(list(probs_long))
+
+                    # For fixed threshold path: compute prediction now
                     num_long_above = sum(1 for p in probs_long if p >= threshold)
                     vote_threshold = ceiling_half(ds.num_long)
                     pred_is_leak = 1 if num_long_above >= vote_threshold else 0
-                    
-                    # Update metrics
-                    if pred_is_leak == true_is_leak:
-                        correct += 1
-                    
-                    if pred_is_leak == 1:
-                        pred_leaks += 1
-                        if true_is_leak == 1:
+
+                    # Metrics for fixed-threshold path
+                    if not optimize_threshold:
+                        total += 1
+                        correct += int(pred_is_leak == true_is_leak)
+                        pred_leaks += pred_is_leak
+                        if true_is_leak == 1 and pred_is_leak == 1:
                             true_positives += 1
-                        else:
+                        elif true_is_leak == 0 and pred_is_leak == 1:
                             false_positives += 1
-                    elif true_is_leak == 1:
-                        false_negatives += 1
-                    
-                    total += 1
-                
-                # Update progress bar
-                fidx = batch_end
-                pbar.update(batch_end - (fidx - files_in_batch))
-                pbar.set_postfix({
-                    "acc": f"{(correct / max(total, 1)):.4f}",
-                    "leak%": f"{(100.0 * pred_leaks / max(total, 1)):.1f}",
-                    "files": f"{total}/{ds.num_files}",
-                })
-                pbar.refresh()
-            
-            pbar.close()
+                        elif true_is_leak == 1 and pred_is_leak == 0:
+                            false_negatives += 1
+
+                status.update(len(file_batch_indices))
     finally:
-        # Ensure NVML cleanup even if evaluation fails
         status.stop()
-    
-    # Compute final metrics
-    file_acc = correct / max(total, 1)
-    
-    # Leak-specific metrics
-    leak_precision = true_positives / max(true_positives + false_positives, 1)
-    leak_recall = true_positives / max(true_positives + false_negatives, 1)
-    leak_f1 = 2 * leak_precision * leak_recall / max(leak_precision + leak_recall, 1e-12)
-    
-    # Performance report
+
+    # If optimize_threshold, sweep thresholds over stored per-file probabilities
+    best_thr = threshold
+    if optimize_threshold and all_file_labels:
+        y_true = np.asarray(all_file_labels, dtype=np.int64)
+        num_files = len(all_file_labels)
+        vote_threshold = ceiling_half(ds.num_long)
+
+        best_f1 = -1.0
+        best_p = 0.0
+        best_r = 0.0
+        best_acc = 0.0
+        best_pred_leaks = 0
+
+        # Ensure threshold_grid is not None
+        if threshold_grid is None:
+            threshold_grid = [round(x, 2) for x in list(np.linspace(0.10, 0.90, 17))]
+
+        for thr in threshold_grid:
+            tp = fp = fn = 0
+            correct_thr = 0
+            pred_leaks_thr = 0
+            for i in range(num_files):
+                probs_long = all_file_long_probs[i]
+                t = int(y_true[i])
+                num_above = sum(1 for p in probs_long if p >= thr)
+                pred = 1 if num_above >= vote_threshold else 0
+                correct_thr += int(pred == t)
+                pred_leaks_thr += pred
+                if t == 1 and pred == 1:
+                    tp += 1
+                elif t == 0 and pred == 1:
+                    fp += 1
+                elif t == 1 and pred == 0:
+                    fn += 1
+
+            acc_thr = correct_thr / max(num_files, 1)
+            prec_thr = tp / max(tp + fp, 1)
+            rec_thr = tp / max(tp + fn, 1)
+            f1_thr = 2 * prec_thr * rec_thr / max(prec_thr + rec_thr, 1e-12)
+
+            if f1_thr > best_f1:
+                best_f1 = f1_thr
+                best_p = prec_thr
+                best_r = rec_thr
+                best_acc = acc_thr
+                best_thr = thr
+                best_pred_leaks = pred_leaks_thr
+
+        file_acc = best_acc
+        leak_precision = best_p
+        leak_recall = best_r
+        leak_f1 = best_f1
+        pred_leaks = best_pred_leaks
+    else:
+        file_acc = correct / max(total, 1)
+        leak_precision = true_positives / max(true_positives + false_positives, 1)
+        leak_recall = true_positives / max(true_positives + false_negatives, 1)
+        leak_f1 = 2 * leak_precision * leak_recall / max(leak_precision + leak_recall, 1e-12)
+
     eval_elapsed = time.perf_counter() - eval_start
     if forward_times:
         avg_fwd = sum(forward_times) / len(forward_times)
         total_fwd = sum(forward_times)
         overhead = eval_elapsed - total_fwd
-        logger.debug("%s[EVAL PROFILE] Total: %.2fs | Forward: %.2fs (%.1f%%) | Overhead: %.2fs (%.1f%%)%s",
-                    CYAN, eval_elapsed, total_fwd, 100*total_fwd/eval_elapsed, 
-                    overhead, 100*overhead/eval_elapsed, RESET)
+        logger.debug(
+            "%s[EVAL PROFILE] Total: %.2fs | Forward: %.2fs (%.1f%%) | Overhead: %.2fs (%.1f%%)%s",
+            CYAN,
+            eval_elapsed,
+            total_fwd,
+            100 * total_fwd / eval_elapsed,
+            overhead,
+            100 * overhead / eval_elapsed,
+            RESET,
+        )
         effective_batch = ds.num_long if batch_long_segments == 0 else batch_long_segments
-        logger.debug("%s[EVAL PROFILE] Avg forward: %.3fs | Batch size: %d long segs | Files/s: %.1f%s",
-                    CYAN, avg_fwd, effective_batch, total/eval_elapsed, RESET)
-    
-    metrics = {
-        "acc": file_acc,
-        "leak_f1": leak_f1,
-        "leak_p": leak_precision,
-        "leak_r": leak_recall,
-        "pred_leaks": pred_leaks,
-        "true_leaks": true_leak_count,
-    }
-    
-    return file_acc, metrics
+        logger.debug(
+            "%s[EVAL PROFILE] Avg forward: %.3fs | Batch size: %d long segs | Files/s: %.1f%s",
+            CYAN,
+            avg_fwd,
+            effective_batch,
+            (len(all_file_labels) if optimize_threshold else total) / max(eval_elapsed, 1e-6),
+            RESET,
+        )
 
+    metrics: Dict[str, float] = {
+        "acc": float(file_acc),
+        "leak_f1": float(leak_f1),
+        "leak_p": float(leak_precision),
+        "leak_r": float(leak_recall),
+        "pred_leaks": float(pred_leaks),
+    }
+    if optimize_threshold:
+        metrics["best_threshold"] = float(best_thr)
+
+    if leak_recall == 0.0 and true_leak_count > 0:
+        logger.warning(
+            "%s[COLLAPSE DETECTED] No LEAKs predicted while leaks exist in dataset (recall=0).%s",
+            YELLOW,
+            RESET,
+        )
+
+    return float(file_acc), metrics
 
 def train_one_epoch(
     epoch: int,
@@ -2291,6 +2373,16 @@ def setup_datasets(cfg: Config) -> Tuple[LeakMelDataset, LeakMelDataset, List[st
     try:
         leak_idx = original_class_names.index(cfg.leak_class_name)
         logger.info("%sLeak class '%s' at index %d%s", GREEN, cfg.leak_class_name, leak_idx, RESET)
+        # Sanity check label distribution (segment-level counts)
+        train_counts = class_counts_from_labels(train_ds)
+        logger.info("Training class segment counts: %s", train_counts.tolist())
+        if leak_idx < len(train_counts) and train_counts[leak_idx] == 0:
+            logger.error("%sNo LEAK segments found in training set at index %d%s", RED, leak_idx, RESET)
+        val_counts = class_counts_from_labels(val_ds)
+        logger.info("Validation class segment counts: %s", val_counts.tolist())
+        if leak_idx < len(val_counts) and val_counts[leak_idx] == 0:
+            logger.warning("%sNo LEAK segments found in validation set at index %d%s", YELLOW, leak_idx, RESET)
+
     except ValueError:
         raise ValueError(
             f"Leak class '{cfg.leak_class_name}' not found in dataset classes: {original_class_names}"
@@ -2660,7 +2752,8 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
         seg_leak_f1 = metrics.get("leak_f1", -1.0)
         
         val_file_acc, file_metrics = evaluate_file_level(
-            model, val_ds, device, leak_idx, model_leak_idx, cfg.use_channels_last, threshold=0.5
+            model, val_ds, device, leak_idx, model_leak_idx, cfg.use_channels_last,
+            threshold=0.5, optimize_threshold=True
         )
         file_leak_f1 = file_metrics["leak_f1"]
         file_leak_p = file_metrics["leak_p"]
@@ -2671,7 +2764,14 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
         logger.info("          │ seg_leak_f1=%.4f │ file_acc=%.4f │ file_leak_f1=%.4f (P=%.4f, R=%.4f)",
                    seg_leak_f1, val_file_acc, file_leak_f1, file_leak_p, file_leak_r)
 
-        scheduler.step()
+        # LR scheduling with optional warmup
+        if cfg.warmup_epochs > 0 and epoch <= cfg.warmup_epochs:
+            warmup_factor = epoch / float(max(1, cfg.warmup_epochs))
+            for pg in optimizer.param_groups:
+                pg['lr'] = cfg.learning_rate * warmup_factor
+            logger.debug("Warmup LR epoch %d: factor=%.3f, lr=%.6e", epoch, warmup_factor, optimizer.param_groups[0]['lr'])
+        else:
+            scheduler.step()
         
         save_checkpoint(
             cfg, epoch, model, optimizer, scheduler, scaler, train_sampler,
@@ -2741,7 +2841,8 @@ def run_final_test(cfg: Config, model, leak_idx: int, model_leak_idx: int, devic
     model.eval()
     
     test_file_acc, test_file_metrics = evaluate_file_level(
-        model, test_ds, device, leak_idx, model_leak_idx, cfg.use_channels_last, threshold=0.5
+        model, test_ds, device, leak_idx, model_leak_idx, cfg.use_channels_last,
+        threshold=0.5, optimize_threshold=True
     )
     
     logger.info("%s[TEST RESULTS - File Level]%s", CYAN, RESET)

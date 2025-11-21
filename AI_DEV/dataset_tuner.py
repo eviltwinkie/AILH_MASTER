@@ -168,7 +168,19 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
     
     # Learning rate (log scale)
     cfg.learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
-    
+
+    leak_oversample_factor = trial.suggest_categorical(
+        "leak_oversample_factor",
+        [1, 2, 3]
+    )
+
+    # collapse prevention: if the model collapses early, do not retry extreme values
+    if leak_oversample_factor == 1 and cfg.binary_mode:
+        trial.set_user_attr("oversample_risk", "HIGH")
+
+    if leak_oversample_factor == 3:
+        trial.set_user_attr("oversample_bias", "PRECISION_DROP")
+
     # Batch size (GPU memory constrained) - Start from 8192 minimum for GPU utilization
     cfg.batch_size = trial.suggest_categorical("batch_size", [12288, 16384, 20480, 24576])
     cfg.val_batch_size = cfg.batch_size // 2
@@ -326,7 +338,8 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                 dataset_leak_idx=leak_idx,
                 model_leak_idx=1 if cfg.binary_mode else leak_idx,
                 use_channels_last=cfg.use_channels_last,
-                batch_long_segments=0
+                batch_long_segments=0,
+                optimize_threshold=True
             )
             
             val_f1 = val_metrics["leak_f1"]
@@ -334,7 +347,7 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
             logger.info(
                 f"Trial {trial.number} Epoch {epoch}/{cfg.epochs}: "
                 f"train_loss={train_loss:.4f}, train_acc={train_acc:.4f}, "
-                f"val_f1={val_f1:.4f}"
+                f"val_f1={val_f1:.4f}, val_file_acc={val_file_acc:.4f}"
             )
             
             # Report to Optuna for pruning
