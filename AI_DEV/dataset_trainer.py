@@ -1723,6 +1723,8 @@ def eval_split(model: nn.Module,
 
     # Diagnostic accumulators for F1 debugging
     all_leak_probs = []  # Sample of leak probabilities for distribution analysis
+    all_leak_logits = []  # Sample of raw leak logits for debugging
+    all_cls_logits = []  # Sample of classification logits
     all_preds_dist = []  # Per-class prediction distribution
     all_labels_dist = []  # Per-class label distribution
     pred_count_by_class = {}
@@ -1745,6 +1747,12 @@ def eval_split(model: nn.Module,
             leak_probs = torch.sigmoid(leak_logit)
             leak_preds = (leak_probs >= leak_threshold).float()
             leak_targets = (labels == leak_idx).float()
+
+            # Sample logits from first batch for debugging (100 samples)
+            if batches_processed == 0:
+                sample_size = min(100, logits.size(0))
+                all_leak_logits = leak_logit[:sample_size].cpu().tolist()
+                all_cls_logits = logits[:sample_size, :].cpu().tolist()
 
             # Accumulate confusion matrix on CPU
             leak_tp += int(((leak_preds == 1) & (leak_targets == 1)).sum().item())
@@ -1806,11 +1814,13 @@ def eval_split(model: nn.Module,
             median_prob = statistics.median(all_leak_probs)
             min_prob = min(all_leak_probs)
             max_prob = max(all_leak_probs)
+            std_prob = statistics.stdev(all_leak_probs) if len(all_leak_probs) > 1 else 0
             logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Leak Probability Distribution (first batch sample):{RESET}")
             logger.warning(f"{YELLOW}  Mean:   {mean_prob:.4f}{RESET}")
             logger.warning(f"{YELLOW}  Median: {median_prob:.4f}{RESET}")
             logger.warning(f"{YELLOW}  Min:    {min_prob:.4f}{RESET}")
             logger.warning(f"{YELLOW}  Max:    {max_prob:.4f}{RESET}")
+            logger.warning(f"{YELLOW}  Std:    {std_prob:.4f}{RESET}")
 
             # Add histogram to show distribution
             hist, bins = np.histogram(all_leak_probs, bins=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
@@ -1818,6 +1828,28 @@ def eval_split(model: nn.Module,
             for i in range(len(hist)):
                 pct = (hist[i] / len(all_leak_probs) * 100) if len(all_leak_probs) > 0 else 0
                 logger.warning(f"{YELLOW}    [{bins[i]:.1f}-{bins[i+1]:.1f}): {hist[i]:5d} ({pct:5.2f}%){RESET}")
+
+        # Log raw logits for debugging model collapse
+        if all_leak_logits:
+            import statistics
+            mean_logit = statistics.mean(all_leak_logits)
+            std_logit = statistics.stdev(all_leak_logits) if len(all_leak_logits) > 1 else 0
+            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Leak Logit Distribution (raw outputs):{RESET}")
+            logger.warning(f"{YELLOW}  Mean: {mean_logit:.4f}, Std: {std_logit:.4f}{RESET}")
+            logger.warning(f"{YELLOW}  Range: [{min(all_leak_logits):.4f}, {max(all_leak_logits):.4f}]{RESET}")
+            if std_logit < 0.01:
+                logger.error(f"{RED}  ⚠️  CONSTANT LOGITS! Model outputting same value for all samples{RESET}")
+
+        # Log classification logits
+        if all_cls_logits:
+            # Average over all samples
+            cls_means = [statistics.mean([logits[i] for logits in all_cls_logits]) for i in range(len(all_cls_logits[0]))]
+            cls_stds = [statistics.stdev([logits[i] for logits in all_cls_logits]) if len(all_cls_logits) > 1 else 0 for i in range(len(all_cls_logits[0]))]
+            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Classification Logits (mean per class):{RESET}")
+            for i, (mean_val, std_val) in enumerate(zip(cls_means, cls_stds)):
+                logger.warning(f"{YELLOW}  Class {i}: {mean_val:7.4f} ± {std_val:.4f}{RESET}")
+            if all(std < 0.01 for std in cls_stds):
+                logger.error(f"{RED}  ⚠️  ALL CLASSES HAVE CONSTANT LOGITS! Model completely collapsed{RESET}")
 
         # Log class prediction distribution
         if pred_count_by_class:
