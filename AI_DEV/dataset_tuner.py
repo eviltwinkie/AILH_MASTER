@@ -125,8 +125,8 @@ class TuningConfig:
         
         # Fixed dataset params (use optimized settings from training)
         self.preload_to_ram = True
-        self.num_workers = 12  # Reduced for smaller batches
-        self.prefetch_factor = 24  # Reduced for smaller batches
+        self.num_workers = 8   # Reduced for tuning (fewer workers = faster startup)
+        self.prefetch_factor = 4  # Lower for tuning (trials are short, don't need aggressive prefetch)
         self.persistent_workers = True  # Enable for multiple epochs per trial
     
     @property
@@ -167,8 +167,8 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningCo
     # === Hyperparameters to optimize ===
     
     # Batch size first (needed for LR scaling) - smaller for smooth GPU utilization
-    cfg.batch_size = trial.suggest_categorical("batch_size", [4096, 6144, 8192, 10240])
-    cfg.val_batch_size = cfg.batch_size // 2
+    cfg.batch_size = trial.suggest_categorical("batch_size", [4096, 6144, 8192])
+    cfg.val_batch_size = min(cfg.batch_size * 2, 16384)  # 2x training (validation doesn't need gradients)
     
     # Learning rate (adjusted for batch size - larger batches need higher LR)
     batch_size_factor = cfg.batch_size / 6144  # Normalize to middle batch size (6144)
@@ -343,16 +343,17 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                     logger.warning(f"{YELLOW}Trial {trial.number}: Model parameters barely changed! Learning may have failed.{RESET}")
                     # Don't return 0.0 immediately, let it continue to see if it improves
 
-            # Validate (full segment-level evaluation for tuning)
+            # Validate (sampled validation for faster tuning)
             # CRITICAL: Use model_leak_idx for binary mode (1) instead of leak_idx (2)
             # After BinaryLabelDataset wrapping, labels are 0/1, not 0-4
+            # For tuning, sample 25% of validation set for speed (31 batches instead of 124)
             val_metrics = eval_split(
                 model=train_model,
                 loader=val_loader,
                 device=device,
                 leak_idx=model_leak_idx,  # FIX: Use model_leak_idx (1 for binary, leak_idx for multi-class)
                 use_channels_last=cfg.use_channels_last,
-                max_batches=None,  # Evaluate entire validation set to avoid missing LEAK class
+                max_batches=40,  # Sample validation (40 batches = ~32% of set, enough for F1 estimate)
                 leak_threshold=0.3  # Lower threshold for imbalanced data
             )
             
