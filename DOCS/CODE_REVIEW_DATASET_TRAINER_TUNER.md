@@ -630,16 +630,17 @@ For severely imbalanced datasets, consider curriculum learning:
    - Reduced `leak_aux_weight` from 0.5 to 0.3 (line 433)
    - Reduced `leak_oversample_factor` from 2 to 1 (line 437)
 
-2. **AI_DEV/dataset_tuner.py** (7 changes):
+2. **AI_DEV/dataset_tuner.py** (8 changes):
    - Fixed binary mode bug: Use `model_leak_idx` instead of `leak_idx` in eval_split call (line 353)
    - Reduced num_workers from 12 to 8 for faster trial startup (line 128)
    - Reduced prefetch_factor from 24 to 4 for lower memory overhead (line 129)
    - Removed batch_size=10240 from search space (line 170)
    - Increased validation batch size to `min(batch_size * 2, 16384)` (line 171)
-   - Added leak_oversample_factor to tuner search space [1, 2] (line 199)
-   - Added leak_weight_boost to tuner search space [1.5, 4.0] (line 200)
    - Changed validation to use full set: max_batches=None (line 361)
    - Increased leak_threshold from 0.3 to 0.5 (line 362)
+   - **REMOVED leak_oversample_factor from search, forced to 1** (line 202)
+   - Reduced leak_aux_weight range: [0.2, 0.6] → [0.1, 0.3] (line 197)
+   - Reduced leak_weight_boost max: 4.0 → 3.0 (line 203)
 
 ### Changes Applied
 
@@ -682,10 +683,16 @@ For severely imbalanced datasets, consider curriculum learning:
 - **Issue**: Model outputting random ~0.5 probabilities, 0.3 threshold caused all LEAK predictions
 - **Fix**: 0.5 threshold appropriate for binary classification with uncertain outputs
 
-✅ **Added critical hyperparameters to tuner search space**:
-- leak_oversample_factor: [1, 2] (control class balance)
-- leak_weight_boost: [1.5, 4.0] (reduce max from 5.0, add to search)
-- Reduced leak_aux_weight max to 0.6 (prevent collapse)
+✅ **Optimized hyperparameter search space** (dataset_tuner.py):
+- **REMOVED leak_oversample_factor from search** - forced to 1 (disabled oversampling)
+  - Trial 0 diagnostic: oversample=2 caused 96.97% LEAK predictions (should be ~60%)
+  - Oversampling + class weights creates severe imbalance
+  - Model learns "always predict LEAK" strategy
+- Reduced leak_weight_boost: [1.5, 4.0] → [1.5, 3.0]
+- Reduced leak_aux_weight: [0.2, 0.6] → [0.1, 0.3]
+  - Trial 0 diagnostic: aux head loss (0.79) >> cls loss (0.09)
+  - Auxiliary head was dominating training
+  - Lower weight allows classification head to lead
 
 ✅ **Added comprehensive training diagnostics** (dataset_trainer.py):
 - **First batch analysis** (epoch 1, batch 0):
@@ -740,7 +747,7 @@ The following changes are RECOMMENDED but NOT applied to allow user review:
 
 ### Issues Fixed ✅
 
-This review identified and **FIXED 4 critical issues**:
+This review identified and **FIXED 5 critical issues**:
 
 #### 1. Binary Mode Leak Detection Bug (CRITICAL)
 **Root cause**: `eval_split()` was checking `labels == leak_idx` (2) but binary labels are 0/1
@@ -761,6 +768,19 @@ This review identified and **FIXED 4 critical issues**:
 **Root cause**: leak_threshold=0.3 with model outputting random ~0.5 probabilities
 - Result: All predictions became LEAK (0.5 > 0.3)
 - **Fixed**: Changed to standard 0.5 threshold for binary classification
+
+#### 5. Tuner Hyperparameter Combinations Causing Collapse (CRITICAL)
+**Root cause**: Tuner randomly selecting oversample_factor=2 + high aux_weight
+- Diagnostic evidence from Trial 0:
+  - Model predicted LEAK for 96.97% of samples (5958/6144)
+  - Actual LEAK in batch: 60.3% (3707/6144)
+  - Auxiliary head loss (0.79) >> classification loss (0.09)
+  - Gradients healthy (1e-4), model WAS learning wrong strategy
+- Result: Model learned "always predict LEAK" to minimize dominant aux head loss
+- **Fixed**:
+  - Removed leak_oversample_factor from search (forced to 1)
+  - Reduced leak_aux_weight range: [0.2, 0.6] → [0.1, 0.3]
+  - Reduced leak_weight_boost max: 4.0 → 3.0
 
 ### Performance Optimizations Applied ✅
 
