@@ -58,7 +58,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, cast
 
 import numpy as np
 import torch
@@ -79,7 +79,7 @@ except ImportError:
 # Import from dataset_trainer
 from dataset_trainer import (
     Config, LeakMelDataset, BinaryLabelDataset, StatefulSampler,
-    train_one_epoch, evaluate_file_level, setup_datasets,
+    train_one_epoch, evaluate_file_level, eval_split, setup_datasets,
     device_setup, set_seed, logger, CYAN, GREEN, YELLOW, RED, RESET,
     LeakCNNMulti, setup_dataloaders, setup_loss_functions,
     SystemMonitor, GPUProfiler
@@ -125,9 +125,9 @@ class TuningConfig:
         
         # Fixed dataset params (use optimized settings from training)
         self.preload_to_ram = True
-        self.num_workers = 20  # Match optimized training config
-        self.prefetch_factor = 48  # Match optimized training config
-        self.persistent_workers = False  # Disable to prevent DataLoader deadlocks during tuning
+        self.num_workers = 12  # Reduced for smaller batches
+        self.prefetch_factor = 24  # Reduced for smaller batches
+        self.persistent_workers = True  # Enable for multiple epochs per trial
     
     @property
     def tuning_dir(self) -> Path:
@@ -145,7 +145,7 @@ class TuningConfig:
         self.plots_dir.mkdir(parents=True, exist_ok=True)
 
 
-def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
+def suggest_hyperparameters(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> Config:
     """
     Suggest hyperparameters for trial.
     
@@ -166,24 +166,15 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
     
     # === Hyperparameters to optimize ===
     
-    # Learning rate (log scale)
-    cfg.learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
-
-    leak_oversample_factor = trial.suggest_categorical(
-        "leak_oversample_factor",
-        [1, 2, 3]
-    )
-
-    # collapse prevention: if the model collapses early, do not retry extreme values
-    if leak_oversample_factor == 1 and cfg.binary_mode:
-        trial.set_user_attr("oversample_risk", "HIGH")
-
-    if leak_oversample_factor == 3:
-        trial.set_user_attr("oversample_bias", "PRECISION_DROP")
-
-    # Batch size (GPU memory constrained) - Start from 8192 minimum for GPU utilization
-    cfg.batch_size = trial.suggest_categorical("batch_size", [12288, 16384, 20480, 24576])
+    # Batch size first (needed for LR scaling) - smaller for smooth GPU utilization
+    cfg.batch_size = trial.suggest_categorical("batch_size", [4096, 6144, 8192, 10240])
     cfg.val_batch_size = cfg.batch_size // 2
+    
+    # Learning rate (adjusted for batch size - larger batches need higher LR)
+    batch_size_factor = cfg.batch_size / 6144  # Normalize to middle batch size (6144)
+    lr_min = 1e-4 * max(1.0, batch_size_factor ** 0.5)  # Scale up min LR with batch size
+    lr_max = 1e-2 * max(1.0, batch_size_factor ** 0.5)  # Scale up max LR with batch size
+    cfg.learning_rate = trial.suggest_float("learning_rate", lr_min, lr_max, log=True)
     
     # Dropout regularization
     cfg.dropout = trial.suggest_float("dropout", 0.1, 0.5, step=0.05)
@@ -205,11 +196,11 @@ def suggest_hyperparameters(trial: Trial, base_cfg: Config) -> Config:
     # Auxiliary leak head weight
     cfg.leak_aux_weight = trial.suggest_float("leak_aux_weight", 0.2, 0.8, step=0.1)
     
-    # Early stopping patience
-    cfg.early_stop_patience = trial.suggest_int("early_stop_patience", 5, 20, step=5)
+    # Disable warmup for tuning (trials are short, want to see LR effect immediately)
+    cfg.warmup_epochs = 0
     
-    # Epochs for this trial (will be stopped early by pruning/early-stop)
-    cfg.epochs = 50
+    # Set epochs for tuning (override default 200)
+    cfg.epochs = tuning_cfg.max_epochs_per_trial
     
     return cfg
 
@@ -224,7 +215,7 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
     trial_start = time.time()
     
     # Generate trial configuration
-    cfg = suggest_hyperparameters(trial, base_cfg)
+    cfg = suggest_hyperparameters(trial, base_cfg, tuning_cfg)
     
     logger.info(f"{CYAN}{'='*80}{RESET}")
     logger.info(f"{CYAN}Optuna Trial #{trial.number}{RESET}")
@@ -232,6 +223,11 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
     logger.info(f"Parameters:")
     for key, value in trial.params.items():
         logger.info(f"  {key}: {value}")
+    logger.info(f"  actual_learning_rate: {cfg.learning_rate:.2e}")
+    logger.info(f"  actual_batch_size: {cfg.batch_size}")
+    logger.info(f"  num_classes: {cfg.num_classes}")
+    logger.info(f"  binary_mode: {cfg.binary_mode}")
+    logger.info(f"  leak_oversample_factor: {cfg.leak_oversample_factor}")
     
     try:
         # Setup
@@ -254,13 +250,18 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
             dropout=cfg.dropout
         ).to(device)
         
-        # Enable optimizations
+        # Enable optimizations (use compile for performance)
         if cfg.use_channels_last:
             model = model.to(memory_format=torch.channels_last)  # type: ignore
         
-        model_compiled: nn.Module = model
+        model_compiled = model
         if cfg.use_compile:
-            model_compiled = torch.compile(model, mode=cfg.compile_mode)  # type: ignore
+            try:
+                model_compiled = torch.compile(model, mode="reduce-overhead")  # More stable mode
+                model_compiled = cast(nn.Module, model_compiled)  # type: ignore
+            except Exception as e:
+                logger.warning(f"torch.compile failed: {e}, using uncompiled model")
+                model_compiled = model
         
         # Setup training components
         train_loader, val_loader, train_sampler = setup_dataloaders(
@@ -270,6 +271,9 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         # Debug: Check DataLoader sizes
         logger.info(f"Trial {trial.number}: train_loader has {len(train_loader)} batches (batch_size={cfg.batch_size})")
         logger.info(f"Trial {trial.number}: val_loader has {len(val_loader)} batches")
+        
+        # Debug: Check model is trainable
+        initial_params = torch.cat([p.flatten() for p in model.parameters()]).detach().cpu()
         
         if len(train_loader) == 0:
             logger.error(f"{RED}Trial {trial.number} failed: train_loader is empty!{RESET}")
@@ -297,7 +301,7 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         scaler = torch.amp.GradScaler('cuda')
         
         # Create monitors for training (reuse across epochs for tuning)
-        sys_monitor = SystemMonitor(device=device, enabled=False)  # Disable for tuning speed
+        sys_monitor = SystemMonitor(device=device, enabled=True)  # Enable for monitoring GPU sputtering
         profiler = GPUProfiler(device=device, enabled=False) if torch.cuda.is_available() else None
         
         # Training loop
@@ -330,24 +334,32 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                 profiler=profiler
             )
             
-            # Validate
-            val_file_acc, val_metrics = evaluate_file_level(
+            # Debug: Check if model parameters are changing
+            if epoch == 1:
+                final_params = torch.cat([p.flatten() for p in model.parameters()]).detach().cpu()
+                param_diff = torch.abs(final_params - initial_params).mean().item()
+                logger.info(f"Trial {trial.number}: Parameter change after epoch 1: {param_diff:.2e}")
+                if param_diff < 1e-6:
+                    logger.warning(f"{YELLOW}Trial {trial.number}: Model parameters barely changed! Learning may have failed.{RESET}")
+                    # Don't return 0.0 immediately, let it continue to see if it improves
+            
+            # Validate (fast segment-level evaluation for tuning)
+            val_metrics = eval_split(
                 model=train_model,
-                ds=val_ds if not cfg.binary_mode else BinaryLabelDataset(val_ds, leak_idx),
+                loader=val_loader,
                 device=device,
-                dataset_leak_idx=leak_idx,
-                model_leak_idx=1 if cfg.binary_mode else leak_idx,
+                leak_idx=leak_idx,
                 use_channels_last=cfg.use_channels_last,
-                batch_long_segments=0,
-                optimize_threshold=True
+                max_batches=5  # Limit to 5 batches for very fast validation
             )
             
             val_f1 = val_metrics["leak_f1"]
+            val_acc = val_metrics["acc"]
             
             logger.info(
                 f"Trial {trial.number} Epoch {epoch}/{cfg.epochs}: "
                 f"train_loss={train_loss:.4f}, train_acc={train_acc:.4f}, "
-                f"val_f1={val_f1:.4f}, val_file_acc={val_file_acc:.4f}"
+                f"val_f1={val_f1:.4f}, val_acc={val_acc:.4f}"
             )
             
             # Report to Optuna for pruning
@@ -433,6 +445,13 @@ def run_optimization(tuning_cfg: TuningConfig):
             n_warmup_steps=tuning_cfg.pruning_warmup
         )
     )
+    
+    # Check if study has incompatible trials
+    if study.trials:
+        logger.warning("⚠️  Existing study found with previous trials.")
+        logger.warning("   If you changed hyperparameter ranges, you may need to restart:")
+        logger.warning("   python dataset_tuner.py --restart")
+        logger.warning("   Or use: python ai_builder.py --tune-binary-model --restart")
     
     logger.info(f"{CYAN}{'='*80}{RESET}")
     logger.info(f"{CYAN}Starting Optuna Hyperparameter Optimization{RESET}")

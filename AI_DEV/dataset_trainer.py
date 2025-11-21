@@ -1145,6 +1145,23 @@ class LeakMelDataset(Dataset):
             self._cache.popitem(last=False)
         return blk  # type: ignore[return-value]
 
+    def get_file(self, file_idx: int) -> Tuple[np.ndarray, int]:
+        """
+        Get file block and label for file-level evaluation.
+        
+        Args:
+            file_idx: Index of file in dataset
+            
+        Returns:
+            Tuple of (file_block, file_label) where:
+            - file_block: [num_long, num_short, (C,) n_mels, t_frames] numpy array
+            - file_label: integer label for the file
+        """
+        self._ensure_open()
+        blk = self._get_file_block(file_idx)
+        label = int(self._labels[file_idx])  # type: ignore[index]
+        return blk, label
+
     def __len__(self): return self.total_segments
 
     def __getitem__(self, index: int):
@@ -1675,16 +1692,18 @@ def eval_split(model: nn.Module,
                loader: DataLoader,  # type: ignore[type-arg]
                device: torch.device,
                leak_idx: int,
-               use_channels_last: bool) -> Dict[str, float]:
+               use_channels_last: bool,
+               max_batches: Optional[int] = None) -> Dict[str, float]:
     """Evaluate model on segment-level data.
-    
+
     Args:
         model: Model to evaluate
         loader: DataLoader for evaluation data
         device: Device for computation
         leak_idx: Index of leak class
         use_channels_last: Whether to use channels_last memory format
-    
+        max_batches: Maximum number of batches to evaluate (for fast tuning)
+
     Returns:
         Dictionary with loss, accuracy, and leak metrics
     """
@@ -1693,8 +1712,13 @@ def eval_split(model: nn.Module,
     total_loss = 0.0
     total = 0
     correct_count = torch.tensor(0, device=device, dtype=torch.int64)  # Accumulate on GPU
-    leak_scores = []
-    leak_targets = []
+
+    # Accumulate confusion matrix directly on CPU to avoid large lists
+    leak_tp = 0
+    leak_fp = 0
+    leak_fn = 0
+
+    batches_processed = 0
     with torch.inference_mode(), torch.amp.autocast('cuda'):
         for mel_batch, labels in loader:
             # Use helper function for consistent mel preparation
@@ -1706,33 +1730,37 @@ def eval_split(model: nn.Module,
             total += labels.size(0)
             preds = logits.argmax(dim=1)
             correct_count += (preds == labels).sum()  # Keep on GPU
-            # collect leak scores
-            rel = (labels == leak_idx).to(torch.float32)
-            leak_targets.append(rel.detach().cpu().numpy())
-            leak_scores.append(torch.sigmoid(leak_logit).detach().cpu().numpy())
-    
+
+            # Compute leak predictions directly
+            leak_preds = (torch.sigmoid(leak_logit) >= 0.5).float()
+            leak_targets = (labels == leak_idx).float()
+
+            # Accumulate confusion matrix on CPU
+            leak_tp += int(((leak_preds == 1) & (leak_targets == 1)).sum().item())
+            leak_fp += int(((leak_preds == 1) & (leak_targets == 0)).sum().item())
+            leak_fn += int(((leak_preds == 0) & (leak_targets == 1)).sum().item())
+
+            batches_processed += 1
+            if max_batches is not None and batches_processed >= max_batches:
+                break
+
     # Single CPU↔GPU sync at end (optimization)
     correct = int(correct_count.item())
     avg_loss = total_loss / max(total, 1)
     acc = correct / max(total, 1)
-    leak_targets = np.concatenate(leak_targets) if leak_scores else np.array([])
-    leak_scores  = np.concatenate(leak_scores) if leak_scores else np.array([])
-    out = {"loss": avg_loss, "acc": acc}
-    # Note: Segment-level leak metrics not used (file-level metrics are primary)
-    # Kept for monitoring purposes only
-    if leak_scores.size:
-        # Compute leak metrics at fixed 0.5 threshold (consistent with file-level)
-        preds = (leak_scores >= 0.5).astype(np.int32)
-        tp = int(((preds == 1) & (leak_targets == 1)).sum())
-        fp = int(((preds == 1) & (leak_targets == 0)).sum())
-        fn = int(((preds == 0) & (leak_targets == 1)).sum())
-        p = tp / max(tp + fp, 1)
-        r = tp / max(tp + fn, 1)
-        f1 = 2*p*r / max(p + r, 1e-12)
-        out.update({"leak_f1": f1, "leak_p": p, "leak_r": r})
-    return out
 
+    # Compute leak metrics
+    leak_precision = leak_tp / max(leak_tp + leak_fp, 1)
+    leak_recall = leak_tp / max(leak_tp + leak_fn, 1)
+    leak_f1 = 2 * leak_precision * leak_recall / max(leak_precision + leak_recall, 1e-12)
 
+    return {
+        "loss": avg_loss,
+        "acc": acc,
+        "leak_f1": leak_f1,
+        "leak_p": leak_precision,
+        "leak_r": leak_recall
+    }
 def evaluate_file_level(
     model: nn.Module,
     ds,  # LeakMelDataset or BinaryLabelDataset
@@ -1890,46 +1918,65 @@ def evaluate_file_level(
         num_files = len(all_file_labels)
         vote_threshold = ceiling_half(ds.num_long)
 
-        best_f1 = -1.0
-        best_p = 0.0
-        best_r = 0.0
-        best_acc = 0.0
-        best_pred_leaks = 0
-
         # Ensure threshold_grid is not None
         if threshold_grid is None:
             threshold_grid = [round(x, 2) for x in list(np.linspace(0.10, 0.90, 17))]
 
-        for thr in threshold_grid:
-            tp = fp = fn = 0
-            correct_thr = 0
-            pred_leaks_thr = 0
-            for i in range(num_files):
-                probs_long = all_file_long_probs[i]
-                t = int(y_true[i])
-                num_above = sum(1 for p in probs_long if p >= thr)
-                pred = 1 if num_above >= vote_threshold else 0
-                correct_thr += int(pred == t)
-                pred_leaks_thr += pred
-                if t == 1 and pred == 1:
-                    tp += 1
-                elif t == 0 and pred == 1:
-                    fp += 1
-                elif t == 1 and pred == 0:
-                    fn += 1
+        # CPU-optimized threshold optimization (more memory efficient)
+        y_true = np.asarray(all_file_labels, dtype=np.int32)
+        num_files = len(all_file_labels)
+        vote_threshold = ceiling_half(ds.num_long)
 
-            acc_thr = correct_thr / max(num_files, 1)
-            prec_thr = tp / max(tp + fp, 1)
-            rec_thr = tp / max(tp + fn, 1)
-            f1_thr = 2 * prec_thr * rec_thr / max(prec_thr + rec_thr, 1e-12)
+        # Pre-allocate arrays for all thresholds
+        num_thresholds = len(threshold_grid)
+        tp_all = np.zeros(num_thresholds, dtype=np.int32)
+        fp_all = np.zeros(num_thresholds, dtype=np.int32)
+        fn_all = np.zeros(num_thresholds, dtype=np.int32)
+        correct_all = np.zeros(num_thresholds, dtype=np.int32)
+        pred_leaks_all = np.zeros(num_thresholds, dtype=np.int32)
 
-            if f1_thr > best_f1:
-                best_f1 = f1_thr
-                best_p = prec_thr
-                best_r = rec_thr
-                best_acc = acc_thr
-                best_thr = thr
-                best_pred_leaks = pred_leaks_thr
+        # Vectorized threshold evaluation using numpy
+        threshold_grid_np = np.array(threshold_grid, dtype=np.float32)
+
+        for file_idx, (true_label, probs_long) in enumerate(zip(y_true, all_file_long_probs)):
+            probs_np = np.array(probs_long, dtype=np.float32)
+
+            # Vectorized comparison: [num_segments] vs [num_thresholds] -> [num_segments, num_thresholds]
+            above_threshold = (probs_np[:, np.newaxis] >= threshold_grid_np).astype(np.int32)
+
+            # Count segments above threshold for each threshold: [num_thresholds]
+            segments_above = above_threshold.sum(axis=0)
+
+            # Apply voting: predict leak if enough segments above threshold
+            predictions = (segments_above >= vote_threshold).astype(np.int32)
+
+            # Update confusion matrix for all thresholds
+            true_is_leak = true_label
+            for thr_idx, pred in enumerate(predictions):
+                pred_leaks_all[thr_idx] += pred
+                correct_all[thr_idx] += int(pred == true_is_leak)
+
+                if true_is_leak == 1 and pred == 1:
+                    tp_all[thr_idx] += 1
+                elif true_is_leak == 0 and pred == 1:
+                    fp_all[thr_idx] += 1
+                elif true_is_leak == 1 and pred == 0:
+                    fn_all[thr_idx] += 1
+
+        # Compute metrics for all thresholds
+        acc_all = correct_all.astype(np.float32) / max(num_files, 1)
+        prec_all = tp_all.astype(np.float32) / np.maximum(tp_all + fp_all, 1)
+        rec_all = tp_all.astype(np.float32) / np.maximum(tp_all + fn_all, 1)
+        f1_all = 2 * prec_all * rec_all / np.maximum(prec_all + rec_all, 1e-12)
+
+        # Find best threshold
+        best_idx = int(np.argmax(f1_all))
+        best_f1 = float(f1_all[best_idx])
+        best_p = float(prec_all[best_idx])
+        best_r = float(rec_all[best_idx])
+        best_acc = float(acc_all[best_idx])
+        best_thr = threshold_grid[best_idx]
+        best_pred_leaks = int(pred_leaks_all[best_idx])
 
         file_acc = best_acc
         leak_precision = best_p
