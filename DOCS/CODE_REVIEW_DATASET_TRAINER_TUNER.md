@@ -618,9 +618,14 @@ For severely imbalanced datasets, consider curriculum learning:
 
 ### Files Modified
 
-1. **AI_DEV/dataset_trainer.py** (5 changes):
+1. **AI_DEV/dataset_trainer.py** (8 changes):
    - Enhanced `eval_split()` function with comprehensive F1 diagnostics (lines 1691-1851)
+   - Added probability histogram to F1 diagnostics (lines 1815-1820)
    - Fixed binary mode bug: Use `model_leak_idx` instead of `leak_idx` in eval_split call (line 2886)
+   - Added first batch prediction debugging (lines 2258-2271)
+   - Added per-epoch gradient magnitude analysis (lines 2312-2324)
+   - Added learning rate tracking and warnings (lines 2326-2330)
+   - Added LR to epoch summary output (line 2333)
    - Reduced `leak_weight_boost` from 5.0 to 2.5 (line 429)
    - Reduced `leak_aux_weight` from 0.5 to 0.3 (line 433)
    - Reduced `leak_oversample_factor` from 2 to 1 (line 437)
@@ -681,6 +686,28 @@ For severely imbalanced datasets, consider curriculum learning:
 - leak_oversample_factor: [1, 2] (control class balance)
 - leak_weight_boost: [1.5, 4.0] (reduce max from 5.0, add to search)
 - Reduced leak_aux_weight max to 0.6 (prevent collapse)
+
+✅ **Added comprehensive training diagnostics** (dataset_trainer.py):
+- **First batch analysis** (epoch 1, batch 0):
+  - Logit ranges and prediction distribution
+  - Label distribution for comparison
+  - Loss breakdown (classification + auxiliary leak head)
+  - Leak head output ranges
+- **Per-epoch gradient analysis**:
+  - Average, min, max gradient magnitudes
+  - Warning if gradients < 1e-8 (vanishing gradients)
+- **Learning rate tracking**:
+  - Current LR logged in epoch summary
+  - Warning if LR < 1e-6 (too low to learn)
+- **Enhanced probability histogram**:
+  - 10 bins (0-1 in 0.1 increments) showing distribution
+  - Identifies if model is confident or uncertain
+
+**Purpose**: Diagnose GPU underutilization, frozen metrics, and stalled learning by revealing:
+- If model predicts same class for everything (prediction distribution)
+- If gradients are flowing or vanishing (gradient magnitudes)
+- If learning rate is appropriate for current config
+- If model is confident or outputting random probabilities
 
 ### Changes Recommended (Not Applied)
 
@@ -747,8 +774,15 @@ This review identified and **FIXED 4 critical issues**:
 Enhanced `eval_split()` with comprehensive F1 diagnostics:
 - Confusion matrix (TP, FP, FN, TN)
 - Leak probability distribution (mean, median, min, max)
+- Probability histogram (10 bins showing distribution)
 - Per-class prediction counts
 - Specific diagnosis messages for common failure modes
+
+Added training process diagnostics in `train_one_epoch()`:
+- **First batch analysis**: Logits, predictions, labels, loss breakdown
+- **Gradient monitoring**: Per-epoch gradient magnitude analysis
+- **Learning rate tracking**: Current LR in epoch summary with warnings
+- **GPU utilization warnings**: Identifies DataLoader bottlenecks
 
 ### Expected Results After All Fixes
 
