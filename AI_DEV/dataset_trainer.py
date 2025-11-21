@@ -2187,42 +2187,57 @@ def train_one_epoch(
         iter_time = time.perf_counter() - prev_batch_end
         if batch_idx > 0:  # Skip first batch (includes warmup)
             dataloader_times.append(iter_time)
-        
+
         batch_start = time.perf_counter()
         if interrupted["flag"]:
             break
-        
+
+        # DETAILED TIMING: Profile first 3 batches of first epoch
+        profile_timing = (epoch == 1 and batch_idx < 3)
+
         # Prepare inputs (non_blocking allows GPU to work while CPU prepares next batch)
+        t0 = time.perf_counter() if profile_timing else 0
         mel_batch = prepare_mel_batch(mel_batch, device, cfg.use_channels_last)
         labels = labels.to(device, non_blocking=True)
-        
+        if profile_timing:
+            torch.cuda.synchronize()  # Wait for data transfer
+            t_data_transfer = time.perf_counter() - t0
+
         # Mark CUDA Graph step boundary for torch.compile
         if cfg.use_compile:
             torch.compiler.cudagraph_mark_step_begin()
-        
+
         if profiler and batch_idx % 50 == 0:
             profiler.sample(f"batch_{batch_idx}")
-        
+
         # Optional SpecAugment
         if cfg.use_specaugment and use_ta:
             with torch.no_grad():
                 if time_mask: mel_batch = time_mask(mel_batch)
                 if freq_mask: mel_batch = freq_mask(mel_batch)
-        
+
         # Forward + backward with gradient accumulation
         is_accum_step = (batch_idx + 1) % accum_steps != 0
-        
+
         # Don't zero gradients on accumulation steps
         if not is_accum_step or batch_idx == 0:
             optimizer.zero_grad(set_to_none=True)
-        
+
+        # Forward pass
+        t1 = time.perf_counter() if profile_timing else 0
         with torch.amp.autocast('cuda'):
             logits, leak_logit = model(mel_batch)
+            if profile_timing:
+                torch.cuda.synchronize()
+                t_forward = time.perf_counter() - t1
+
+            # Loss computation
+            t2 = time.perf_counter() if profile_timing else 0
             loss_cls = cls_loss_fn(logits, labels)
-            
+
             if cfg.use_leak_aux_head:
                 # Auxiliary head: Binary LEAK detection across both modes
-                # 
+                #
                 # Binary mode (n_classes=2):
                 #   - labels: 0 (NOLEAK) or 1 (LEAK) from BinaryLabelDataset
                 #   - model_leak_idx: 1 (LEAK class in binary output)
@@ -2241,19 +2256,42 @@ def train_one_epoch(
                 loss = loss_cls + cfg.leak_aux_weight * loss_leak
             else:
                 loss = loss_cls
-        
+            if profile_timing:
+                torch.cuda.synchronize()
+                t_loss = time.perf_counter() - t2
+
         # Scale loss for gradient accumulation
         loss = loss / accum_steps
-        
+
+        # Backward pass
+        t3 = time.perf_counter() if profile_timing else 0
         scaler.scale(loss).backward()
-        
+        if profile_timing:
+            torch.cuda.synchronize()
+            t_backward = time.perf_counter() - t3
+
         # Only step optimizer after accumulating gradients
+        t4 = time.perf_counter() if profile_timing else 0
         if not is_accum_step:
             if cfg.grad_clip_norm is not None:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)  # type: ignore[attr-defined]
             scaler.step(optimizer)
             scaler.update()
+        if profile_timing:
+            torch.cuda.synchronize()
+            t_optimizer = time.perf_counter() - t4
+
+            # Log detailed timing breakdown
+            total_time = t_data_transfer + t_forward + t_loss + t_backward + t_optimizer
+            logger.debug(f"{YELLOW}[TIMING] Batch {batch_idx} breakdown (total: {total_time*1000:.2f}ms):{RESET}")
+            logger.debug(f"  Data transfer: {t_data_transfer*1000:6.2f}ms ({t_data_transfer/total_time*100:5.1f}%)")
+            logger.debug(f"  Forward pass:  {t_forward*1000:6.2f}ms ({t_forward/total_time*100:5.1f}%)")
+            logger.debug(f"  Loss compute:  {t_loss*1000:6.2f}ms ({t_loss/total_time*100:5.1f}%)")
+            logger.debug(f"  Backward pass: {t_backward*1000:6.2f}ms ({t_backward/total_time*100:5.1f}%)")
+            logger.debug(f"  Optimizer:     {t_optimizer*1000:6.2f}ms ({t_optimizer/total_time*100:5.1f}%)")
+            logger.debug(f"  GPU idle time: {(iter_time - total_time)*1000:6.2f}ms (DataLoader delay)")
+
         
         # Track metrics (keep on GPU to avoid sync, only sync at report intervals)
         bs = labels.size(0)
