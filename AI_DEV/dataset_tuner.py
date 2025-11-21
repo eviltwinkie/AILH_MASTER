@@ -126,7 +126,7 @@ class TuningConfig:
         # Fixed dataset params (use optimized settings from training)
         self.preload_to_ram = True
         self.num_workers = 12   # Increased for better GPU utilization
-        self.prefetch_factor = 12  # Increased to keep GPU fed
+        self.prefetch_factor = 4  # Reduced from 12 to avoid RAM bandwidth saturation
         self.persistent_workers = True  # Enable for multiple epochs per trial
     
     @property

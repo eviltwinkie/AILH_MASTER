@@ -2209,8 +2209,12 @@ def train_one_epoch(
     )
     batch_times = []
     dataloader_times = []
+    dataloader_spike_batches = []  # Track which batches have spikes
     prev_batch_end = time.perf_counter()
-    
+
+    # DataLoader spike detection threshold (>50ms is concerning)
+    SPIKE_THRESHOLD_MS = 50.0
+
     # Sample system stats every N batches (reduce sync overhead)
     report_interval = max(20, len(train_loader) // 5)  # 5 reports per epoch (was 10)
     
@@ -2225,6 +2229,23 @@ def train_one_epoch(
         iter_time = time.perf_counter() - prev_batch_end
         if batch_idx > 0:  # Skip first batch (includes warmup)
             dataloader_times.append(iter_time)
+
+            # Detect and log DataLoader spikes for debugging
+            iter_time_ms = iter_time * 1000
+            if iter_time_ms > SPIKE_THRESHOLD_MS:
+                dataloader_spike_batches.append((batch_idx, iter_time_ms))
+
+                # Log detailed diagnostics when spike occurs
+                sys_stats = sys_monitor.get_stats()
+                gpu_mem_mb = sys_stats.get('vram_used_gb', 0) * 1024
+                ram_used_gb = sys_stats.get('ram_used_gb', 0)
+                ram_pct = sys_stats.get('ram_percent', 0)
+                cpu_pct = sys_stats.get('cpu_percent', 0)
+
+                logger.debug(
+                    f"{YELLOW}[SPIKE] Batch {batch_idx}: DataLoader took {iter_time_ms:.1f}ms "
+                    f"(GPU: {gpu_mem_mb:.0f}MB, RAM: {ram_used_gb:.1f}GB/{ram_pct:.0f}%, CPU: {cpu_pct:.0f}%){RESET}"
+                )
 
         batch_start = time.perf_counter()
         if interrupted["flag"]:
@@ -2386,10 +2407,49 @@ def train_one_epoch(
         if dataloader_times:
             avg_iter = sum(dataloader_times) / len(dataloader_times)
             max_iter = max(dataloader_times)
-            logger.debug("%s[TRAIN PROFILE] DataLoader avg: %.3fms, max: %.3fms%s",
-                        CYAN, avg_iter * 1000, max_iter * 1000, RESET)
-            if avg_iter > 0.050:  # > 50ms is a bottleneck
-                logger.warning("%s⚠️  DataLoader is slow (%.1fms avg)! Consider increasing prefetch_factor or num_workers%s",
+            min_iter = min(dataloader_times)
+            median_iter = sorted(dataloader_times)[len(dataloader_times) // 2]
+
+            logger.debug("%s[TRAIN PROFILE] DataLoader timing:%s", CYAN, RESET)
+            logger.debug("  Avg: %.3fms, Median: %.3fms, Min: %.3fms, Max: %.3fms",
+                        avg_iter * 1000, median_iter * 1000, min_iter * 1000, max_iter * 1000)
+
+            # Analyze spike pattern
+            if dataloader_spike_batches:
+                spike_count = len(dataloader_spike_batches)
+                spike_pct = spike_count / len(dataloader_times) * 100
+                logger.debug(f"  {YELLOW}Spikes: {spike_count} batches ({spike_pct:.1f}%) exceeded {SPIKE_THRESHOLD_MS}ms{RESET}")
+
+                # Show worst 5 spikes
+                worst_spikes = sorted(dataloader_spike_batches, key=lambda x: x[1], reverse=True)[:5]
+                logger.debug(f"  Worst spikes (batch_idx, time_ms): {worst_spikes}")
+
+                # Check for patterns in spike locations
+                spike_indices = [idx for idx, _ in dataloader_spike_batches]
+                if len(spike_indices) >= 2:
+                    # Check if spikes are periodic (e.g., every N batches)
+                    diffs = [spike_indices[i+1] - spike_indices[i] for i in range(len(spike_indices)-1)]
+                    if diffs:
+                        avg_diff = sum(diffs) / len(diffs)
+                        logger.debug(f"  Spike spacing: avg={avg_diff:.1f} batches (checking for periodicity)")
+
+                # Provide diagnostics based on spike characteristics
+                if spike_pct > 10:
+                    logger.warning(
+                        f"{YELLOW}⚠️  HIGH SPIKE RATE ({spike_pct:.1f}%)! Root causes to investigate:{RESET}"
+                    )
+                    logger.warning("  1. RAM bandwidth saturation (try num_workers=8 or prefetch_factor=2)")
+                    logger.warning("  2. CPU cache thrashing with many workers (try num_workers=8)")
+                    logger.warning("  3. NUMA effects - workers on different CPU sockets")
+                    logger.warning("  4. Python GIL contention during pickle deserialization")
+                    logger.warning("  5. Disk/SSD latency if preload_to_ram=False")
+                elif spike_pct > 5:
+                    logger.warning(
+                        f"{YELLOW}⚠️  MODERATE SPIKE RATE ({spike_pct:.1f}%). Consider reducing num_workers or prefetch_factor.{RESET}"
+                    )
+
+            if avg_iter > 0.050:  # > 50ms avg is a bottleneck
+                logger.warning("%s⚠️  DataLoader avg is high (%.1fms)! Consider increasing prefetch_factor or num_workers%s",
                               YELLOW, avg_iter * 1000, RESET)
     
     # DEBUG: Calculate gradient magnitudes after epoch completes
