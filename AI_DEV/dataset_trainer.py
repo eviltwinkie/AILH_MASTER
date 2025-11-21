@@ -1812,6 +1812,13 @@ def eval_split(model: nn.Module,
             logger.warning(f"{YELLOW}  Min:    {min_prob:.4f}{RESET}")
             logger.warning(f"{YELLOW}  Max:    {max_prob:.4f}{RESET}")
 
+            # Add histogram to show distribution
+            hist, bins = np.histogram(all_leak_probs, bins=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+            logger.warning(f"{YELLOW}  Histogram (leak probability bins):{RESET}")
+            for i in range(len(hist)):
+                pct = (hist[i] / len(all_leak_probs) * 100) if len(all_leak_probs) > 0 else 0
+                logger.warning(f"{YELLOW}    [{bins[i]:.1f}-{bins[i+1]:.1f}): {hist[i]:5d} ({pct:5.2f}%){RESET}")
+
         # Log class prediction distribution
         if pred_count_by_class:
             logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Class Prediction Distribution (first batch):{RESET}")
@@ -2254,7 +2261,22 @@ def train_one_epoch(
         preds = logits.argmax(dim=1)
         correct_count += (preds == labels).sum()  # Keep on GPU
         seen += bs
-        
+
+        # DEBUG: Sample predictions on first batch of first epoch
+        if epoch == 1 and batch_idx == 0:
+            with torch.no_grad():
+                probs = torch.softmax(logits, dim=1)
+                logger.debug(f"{YELLOW}[DEBUG] First batch predictions:{RESET}")
+                logger.debug(f"  Logits shape: {logits.shape}, range: [{logits.min():.4f}, {logits.max():.4f}]")
+                logger.debug(f"  Predictions (first 20): {preds[:20].cpu().tolist()}")
+                logger.debug(f"  Labels (first 20): {labels[:20].cpu().tolist()}")
+                logger.debug(f"  Prediction distribution: {torch.bincount(preds).cpu().tolist()}")
+                logger.debug(f"  Label distribution: {torch.bincount(labels).cpu().tolist()}")
+                logger.debug(f"  Loss (cls): {loss_cls.item():.4f}")
+                if cfg.use_leak_aux_head:
+                    logger.debug(f"  Loss (leak aux): {loss_leak.item():.4f}, weight: {cfg.leak_aux_weight}")
+                    logger.debug(f"  Leak head output shape: {leak_logit.shape}, range: [{leak_logit.min():.4f}, {leak_logit.max():.4f}]")
+
         batch_elapsed = time.perf_counter() - batch_start
         batch_times.append(batch_elapsed)
         prev_batch_end = time.perf_counter()  # For next iteration's DataLoader timing
@@ -2294,19 +2316,39 @@ def train_one_epoch(
                 logger.warning("%s⚠️  DataLoader is slow (%.1fms avg)! Consider increasing prefetch_factor or num_workers%s",
                               YELLOW, avg_iter * 1000, RESET)
     
+    # DEBUG: Calculate gradient magnitudes after epoch completes
+    grad_mags = []
+    for p in model.parameters():  # type: ignore[attr-defined]
+        if p.grad is not None:
+            grad_mags.append(p.grad.abs().mean().item())
+
+    if grad_mags:
+        avg_grad = sum(grad_mags) / len(grad_mags)
+        max_grad = max(grad_mags)
+        min_grad = min(grad_mags)
+        logger.debug(f"{YELLOW}[DEBUG] Gradient magnitudes: avg={avg_grad:.2e}, min={min_grad:.2e}, max={max_grad:.2e}{RESET}")
+        if avg_grad < 1e-8:
+            logger.warning(f"{YELLOW}⚠️  VERY SMALL GRADIENTS ({avg_grad:.2e})! Model may not be learning.{RESET}")
+
+    # DEBUG: Log current learning rate
+    current_lr = optimizer.param_groups[0]['lr']
+    logger.debug(f"{YELLOW}[DEBUG] Current learning rate: {current_lr:.2e}{RESET}")
+    if current_lr < 1e-6:
+        logger.warning(f"{YELLOW}⚠️  VERY LOW LEARNING RATE ({current_lr:.2e})! Model may train very slowly.{RESET}")
+
     # Print epoch summary with resource utilization
-    logger.info("%s[EPOCH %d SUMMARY] Loss: %.4f | Acc: %.2f%% | %s%s",
-               CYAN, epoch, train_loss, train_acc * 100, sys_monitor.format_stats(), RESET)
-    
+    logger.info("%s[EPOCH %d SUMMARY] Loss: %.4f | Acc: %.2f%% | LR: %.2e | %s%s",
+               CYAN, epoch, train_loss, train_acc * 100, current_lr, sys_monitor.format_stats(), RESET)
+
     # Alert if GPU utilization is low (bottleneck detection)
     if 'gpu_util' in final_stats and final_stats['gpu_util'] >= 0 and final_stats['gpu_util'] < 30:
-        logger.warning("%s⚠️  LOW GPU UTILIZATION (%.1f%%)! Possible bottlenecks:%s", 
+        logger.warning("%s⚠️  LOW GPU UTILIZATION (%.1f%%)! Possible bottlenecks:%s",
                       YELLOW, final_stats['gpu_util'], RESET)
         logger.warning("%s   - Increase batch_size (current: %d)%s", YELLOW, cfg.batch_size, RESET)
         logger.warning("%s   - Increase num_workers (current: %d)%s", YELLOW, cfg.num_workers, RESET)
         logger.warning("%s   - Increase prefetch_factor (current: %d)%s", YELLOW, cfg.prefetch_factor, RESET)
         logger.warning("%s   - Check DataLoader timing above%s", YELLOW, RESET)
-    
+
     return train_loss, train_acc
 
 
