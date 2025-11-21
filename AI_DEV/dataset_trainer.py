@@ -1719,6 +1719,14 @@ def eval_split(model: nn.Module,
     leak_tp = 0
     leak_fp = 0
     leak_fn = 0
+    leak_tn = 0
+
+    # Diagnostic accumulators for F1 debugging
+    all_leak_probs = []  # Sample of leak probabilities for distribution analysis
+    all_preds_dist = []  # Per-class prediction distribution
+    all_labels_dist = []  # Per-class label distribution
+    pred_count_by_class = {}
+    label_count_by_class = {}
 
     batches_processed = 0
     with torch.inference_mode(), torch.amp.autocast('cuda'):
@@ -1734,13 +1742,26 @@ def eval_split(model: nn.Module,
             correct_count += (preds == labels).sum()  # Keep on GPU
 
             # Compute leak predictions using configurable threshold (lower for imbalanced data)
-            leak_preds = (torch.sigmoid(leak_logit) >= leak_threshold).float()
+            leak_probs = torch.sigmoid(leak_logit)
+            leak_preds = (leak_probs >= leak_threshold).float()
             leak_targets = (labels == leak_idx).float()
 
             # Accumulate confusion matrix on CPU
             leak_tp += int(((leak_preds == 1) & (leak_targets == 1)).sum().item())
             leak_fp += int(((leak_preds == 1) & (leak_targets == 0)).sum().item())
             leak_fn += int(((leak_preds == 0) & (leak_targets == 1)).sum().item())
+            leak_tn += int(((leak_preds == 0) & (leak_targets == 0)).sum().item())
+
+            # Collect diagnostic data (sample only first batch to avoid memory issues)
+            if batches_processed == 0:
+                all_leak_probs = leak_probs.detach().cpu().numpy()[:100].tolist()  # First 100 samples
+
+                # Count predictions and labels by class
+                preds_np = preds.cpu().numpy()
+                labels_np = labels.cpu().numpy()
+                for c in range(logits.size(1)):
+                    pred_count_by_class[c] = int((preds_np == c).sum())
+                    label_count_by_class[c] = int((labels_np == c).sum())
 
             batches_processed += 1
             if max_batches is not None and batches_processed >= max_batches:
@@ -1756,12 +1777,77 @@ def eval_split(model: nn.Module,
     leak_recall = leak_tp / max(leak_tp + leak_fn, 1)
     leak_f1 = 2 * leak_precision * leak_recall / max(leak_precision + leak_recall, 1e-12)
 
+    # Total actual leaks and predicted leaks
+    total_actual_leaks = leak_tp + leak_fn
+    total_pred_leaks = leak_tp + leak_fp
+
+    # DIAGNOSTIC LOGGING: Help identify F1 score issues
+    if leak_f1 == 0.0 or leak_f1 < 0.1:
+        logger.warning(f"{YELLOW}{'='*80}{RESET}")
+        logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] F1 score is {leak_f1:.4f} - Investigating...{RESET}")
+        logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Confusion Matrix:{RESET}")
+        logger.warning(f"{YELLOW}  TP (True Positives):  {leak_tp:6d} (predicted=LEAK, actual=LEAK){RESET}")
+        logger.warning(f"{YELLOW}  FP (False Positives): {leak_fp:6d} (predicted=LEAK, actual=NOT-LEAK){RESET}")
+        logger.warning(f"{YELLOW}  FN (False Negatives): {leak_fn:6d} (predicted=NOT-LEAK, actual=LEAK){RESET}")
+        logger.warning(f"{YELLOW}  TN (True Negatives):  {leak_tn:6d} (predicted=NOT-LEAK, actual=NOT-LEAK){RESET}")
+        logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Metrics:{RESET}")
+        logger.warning(f"{YELLOW}  Precision: {leak_precision:.4f} = TP / (TP + FP) = {leak_tp} / {leak_tp + leak_fp}{RESET}")
+        logger.warning(f"{YELLOW}  Recall:    {leak_recall:.4f} = TP / (TP + FN) = {leak_tp} / {total_actual_leaks}{RESET}")
+        logger.warning(f"{YELLOW}  F1:        {leak_f1:.4f} = 2*P*R / (P+R){RESET}")
+        logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Leak Statistics:{RESET}")
+        logger.warning(f"{YELLOW}  Actual LEAK samples:    {total_actual_leaks:6d} / {total:6d} ({100*total_actual_leaks/max(total,1):.2f}%){RESET}")
+        logger.warning(f"{YELLOW}  Predicted LEAK samples: {total_pred_leaks:6d} / {total:6d} ({100*total_pred_leaks/max(total,1):.2f}%){RESET}")
+        logger.warning(f"{YELLOW}  Leak threshold:         {leak_threshold:.3f}{RESET}")
+
+        # Log leak probability distribution
+        if all_leak_probs:
+            import statistics
+            mean_prob = statistics.mean(all_leak_probs)
+            median_prob = statistics.median(all_leak_probs)
+            min_prob = min(all_leak_probs)
+            max_prob = max(all_leak_probs)
+            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Leak Probability Distribution (first batch sample):{RESET}")
+            logger.warning(f"{YELLOW}  Mean:   {mean_prob:.4f}{RESET}")
+            logger.warning(f"{YELLOW}  Median: {median_prob:.4f}{RESET}")
+            logger.warning(f"{YELLOW}  Min:    {min_prob:.4f}{RESET}")
+            logger.warning(f"{YELLOW}  Max:    {max_prob:.4f}{RESET}")
+
+        # Log class prediction distribution
+        if pred_count_by_class:
+            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Class Prediction Distribution (first batch):{RESET}")
+            for c, count in sorted(pred_count_by_class.items()):
+                label_count = label_count_by_class.get(c, 0)
+                logger.warning(f"{YELLOW}  Class {c}: predicted={count:4d}, actual={label_count:4d}{RESET}")
+
+        # Diagnosis
+        if leak_tp == 0 and total_actual_leaks > 0:
+            logger.error(f"{RED}[F1 DIAGNOSIS] MODEL COLLAPSE: Model is NOT predicting any LEAK samples correctly!{RESET}")
+            logger.error(f"{RED}  - Model may have collapsed to predicting only non-LEAK classes{RESET}")
+            logger.error(f"{RED}  - Check class weights, loss function, and learning rate{RESET}")
+            logger.error(f"{RED}  - Consider lowering leak_threshold (current: {leak_threshold}){RESET}")
+        elif leak_tp == 0 and total_pred_leaks == 0:
+            logger.error(f"{RED}[F1 DIAGNOSIS] MODEL COLLAPSE: Model predicts NO leaks at all!{RESET}")
+            logger.error(f"{RED}  - All leak probabilities are below threshold {leak_threshold}{RESET}")
+            logger.error(f"{RED}  - Leak head may not be learning properly{RESET}")
+            logger.error(f"{RED}  - Check leak_aux_weight and pos_weight in BCE loss{RESET}")
+        elif total_actual_leaks == 0:
+            logger.warning(f"{YELLOW}[F1 DIAGNOSIS] NO LEAK SAMPLES: Validation set has no LEAK samples!{RESET}")
+            logger.warning(f"{YELLOW}  - F1 score is undefined without positive samples{RESET}")
+
+        logger.warning(f"{YELLOW}{'='*80}{RESET}")
+
     return {
         "loss": avg_loss,
         "acc": acc,
         "leak_f1": leak_f1,
         "leak_p": leak_precision,
-        "leak_r": leak_recall
+        "leak_r": leak_recall,
+        "leak_tp": leak_tp,
+        "leak_fp": leak_fp,
+        "leak_fn": leak_fn,
+        "leak_tn": leak_tn,
+        "total_actual_leaks": total_actual_leaks,
+        "total_pred_leaks": total_pred_leaks
     }
 def evaluate_file_level(
     model: nn.Module,

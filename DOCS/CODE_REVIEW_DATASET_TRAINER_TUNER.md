@@ -1,0 +1,662 @@
+# Code Review: dataset_trainer.py and dataset_tuner.py
+
+**Date**: 2025-11-21
+**Reviewer**: Claude
+**Branch**: `claude/review-dataset-trainer-tuner-01LnRNFhdC7WxRhSrm7XDJFF`
+**Files Reviewed**:
+- AI_DEV/dataset_trainer.py (38,245 tokens)
+- AI_DEV/dataset_tuner.py (594 lines)
+
+---
+
+## Executive Summary
+
+This review identified **1 critical bug** (F1 score diagnostic gap), **5 optimization opportunities**, and **3 best practice violations**. The F1 score issue (val_f1=0.0000) is caused by **model collapse** - the model is not learning to predict LEAK class correctly.
+
+### Critical Finding
+
+**F1 Score = 0.0 Issue**: The model is experiencing class collapse, failing to predict LEAK samples. The root cause is:
+- Training accuracy stuck at 60.75% across all epochs
+- Loss decreasing very slowly (0.8665 → 0.8659)
+- Validation F1 = 0.0 (model predicts NO leaks or all predictions wrong)
+
+**Implemented Fix**: Added comprehensive diagnostic logging to `eval_split()` function to identify the exact cause of F1=0.0.
+
+---
+
+## 1. Critical Issues Found
+
+### 1.1 F1 Score Diagnostic Gap ⚠️ **CRITICAL**
+
+**Issue**: When F1 score is 0.0, there is no diagnostic information to identify why. This makes debugging model collapse extremely difficult.
+
+**Root Cause**: The `eval_split()` function returns F1=0.0 when:
+- Model predicts NO leaks (leak_tp + leak_fp = 0)
+- Model predicts all leaks incorrectly (leak_tp = 0)
+- No leak samples in validation set (leak_tp + leak_fn = 0)
+
+**Location**: `dataset_trainer.py:1691-1765` (eval_split function)
+
+**Impact**:
+- Unable to diagnose model training issues
+- Wasted compute time on collapsed models
+- Difficulty identifying threshold tuning needs
+
+**Fix Applied** ✅:
+```python
+# Added comprehensive diagnostics to eval_split():
+- Confusion matrix (TP, FP, FN, TN)
+- Leak probability distribution (mean, median, min, max)
+- Per-class prediction distribution
+- Actual vs predicted leak counts
+- Specific diagnosis messages for common failure modes:
+  * Model collapse (predicts no leaks)
+  * Threshold too high
+  * No leak samples in validation set
+```
+
+**Result**: Now when F1=0.0, you will see detailed output like:
+```
+[F1 DIAGNOSTIC] F1 score is 0.0000 - Investigating...
+[F1 DIAGNOSTIC] Confusion Matrix:
+  TP (True Positives):  0 (predicted=LEAK, actual=LEAK)
+  FP (False Positives): 0 (predicted=LEAK, actual=NOT-LEAK)
+  FN (False Negatives): 1234 (predicted=NOT-LEAK, actual=LEAK)
+  TN (True Negatives):  8765 (predicted=NOT-LEAK, actual=NOT-LEAK)
+[F1 DIAGNOSIS] MODEL COLLAPSE: Model is NOT predicting any LEAK samples correctly!
+  - Model may have collapsed to predicting only non-LEAK classes
+  - Check class weights, loss function, and learning rate
+  - Consider lowering leak_threshold (current: 0.300)
+```
+
+---
+
+### 1.2 Model Collapse Detection ⚠️ **HIGH PRIORITY**
+
+**Observed Symptoms** (from user's log):
+```
+Epoch 1: train_acc=0.6075, val_f1=0.0000, val_acc=0.4365
+Epoch 2: train_acc=0.6075, val_f1=0.0000, val_acc=0.4365
+Epoch 3: train_acc=0.6075, val_f1=0.0000, val_acc=0.4365
+...
+Epoch 12: train_acc=0.6075, val_f1=0.0000, val_acc=0.4365
+```
+
+**Diagnosis**:
+1. **Training accuracy stuck at exactly 60.75%** - suggests model is predicting a single class
+2. **Loss barely decreasing** (0.8665 → 0.8659) - model not learning effectively
+3. **Validation accuracy worse than training** (43.65% vs 60.75%) - severe overfitting to one class
+
+**Likely Root Causes**:
+
+a) **Class imbalance not properly addressed**:
+   - LEAK class may be <10% of dataset
+   - Current class weights may be insufficient
+   - Binary LEAK weight boost (5.0x) may still be too low
+
+b) **Loss function issue**:
+   - Auxiliary leak loss weight (0.5) may be too low
+   - BCE pos_weight for leak head may be incorrect
+   - Focal loss parameters (if used) may need tuning
+
+c) **Learning rate issues**:
+   - LR = 1e-3 may be too high or too low
+   - Warmup epochs (3) may be insufficient
+   - Cosine annealing may be decaying LR too fast
+
+d) **Batch size too large**:
+   - batch_size=8192 may cause gradient averaging issues
+   - Smaller batches (4096) may help with imbalanced learning
+
+**Recommended Fixes**:
+
+1. **Increase LEAK class weight** (Config line 429):
+   ```python
+   leak_weight_boost: float = 10.0  # Increase from 5.0 to 10.0
+   ```
+
+2. **Increase auxiliary leak head weight** (Config line 433):
+   ```python
+   leak_aux_weight: float = 0.8  # Increase from 0.5 to 0.8
+   ```
+
+3. **Reduce batch size** (Config line 411):
+   ```python
+   batch_size: int = 4096  # Reduce from 8192 to 4096
+   ```
+
+4. **Increase warmup epochs** (Config line 415):
+   ```python
+   warmup_epochs: int = 5  # Increase from 3 to 5
+   ```
+
+5. **Lower learning rate** (Config line 416):
+   ```python
+   learning_rate: float = 5e-4  # Reduce from 1e-3 to 5e-4
+   ```
+
+6. **Enable gradient clipping** (Config line 420):
+   ```python
+   grad_clip_norm: Optional[float] = 0.5  # Reduce from 1.0 to 0.5 (tighter clipping)
+   ```
+
+7. **Increase LEAK oversampling** (Config line 437):
+   ```python
+   leak_oversample_factor: int = 4  # Increase from 2 to 4
+   ```
+
+---
+
+## 2. Performance Optimizations
+
+### 2.1 RAM Utilization (LOW) 📊
+
+**Current State**: Only 24.4% RAM usage (23GB / 94GB)
+
+**Issue**: With 90GB+ available RAM, we can do much more aggressive preloading and caching.
+
+**Recommendations**:
+
+1. **Increase DataLoader prefetching**:
+   ```python
+   # dataset_trainer.py Config line 441-442
+   prefetch_factor: int = 8  # Increase from 4 to 8
+   num_workers: int = 16     # Increase from 12 to 16
+   ```
+
+2. **Add validation set preloading**:
+   - Currently only training set is preloaded to RAM
+   - Validation set should also be preloaded for faster evaluation
+   - Estimated RAM cost: ~4-6GB
+
+3. **Cache mel spectrograms in RAM**:
+   - HDF5 reads can still be a bottleneck
+   - Pre-compute and cache all mel specs in RAM
+   - Estimated RAM cost: ~10-15GB
+
+**Expected Impact**:
+- 10-15% faster training throughput
+- Eliminate I/O wait during validation
+- Better GPU utilization (less starvation)
+
+---
+
+### 2.2 Batch Size Optimization 🔧
+
+**Current Settings**:
+- Training batch: 8192 samples
+- Validation batch: 16384 samples
+- VRAM usage: 98.5% (23.5GB / 23.9GB)
+
+**Issues**:
+1. **Batch size too large for imbalanced learning**:
+   - Large batches average out gradients from rare LEAK class
+   - Minority class gets "drowned out" by majority classes
+   - Each batch may contain only 10-20 LEAK samples
+
+2. **VRAM at 98%+ limits flexibility**:
+   - No headroom for compilation optimizations
+   - Risk of OOM on certain data patterns
+   - Limits ability to use larger models
+
+**Recommendations**:
+
+1. **Reduce training batch size**:
+   ```python
+   batch_size: int = 4096  # From 8192
+   ```
+   **Benefit**: Better gradient signal from LEAK class, more stable training
+
+2. **Keep validation batch large**:
+   ```python
+   val_batch_size: int = 16384  # Keep unchanged
+   ```
+   **Benefit**: Faster evaluation, validation doesn't need gradients
+
+3. **Target VRAM usage 85-90%**:
+   - Leaves headroom for compilation and peaks
+   - More stable training
+
+**Expected Impact**:
+- Better LEAK class learning (most important!)
+- More stable gradients
+- Slight increase in training time (10-15%) but better convergence
+
+---
+
+### 2.3 GPU Utilization Variability 📈
+
+**Observed**: GPU utilization varies 79-91% across epochs
+
+**Issue**: This suggests GPU starvation periods where the GPU is waiting for data.
+
+**Root Causes**:
+1. DataLoader not keeping up with GPU consumption
+2. Small file I/O spikes causing delays
+3. CPU preprocessing bottleneck
+
+**Recommendations**:
+
+1. **Optimize DataLoader settings**:
+   ```python
+   num_workers: int = 16          # From 12
+   prefetch_factor: int = 8       # From 4
+   persistent_workers: bool = True # Already enabled ✓
+   ```
+
+2. **Enable async data transfer**:
+   - Already using `non_blocking=True` ✓
+   - Ensure pinned memory is enabled ✓
+
+3. **Profile with CUDA events**:
+   - Add timing around data loading vs GPU compute
+   - Identify exact bottleneck
+
+**Expected Impact**:
+- More consistent 90%+ GPU utilization
+- 5-10% training speedup
+- Smoother training progress
+
+---
+
+### 2.4 Redundant Computations in eval_split() 🔄
+
+**Issue**: Creating criterion inside eval_split() for every evaluation call.
+
+**Location**: `dataset_trainer.py:1713`
+```python
+def eval_split(...):
+    criterion = nn.CrossEntropyLoss(reduction="sum")  # Created every call!
+```
+
+**Impact**: Minor overhead, but adds up over 200 epochs × multiple validations.
+
+**Fix**:
+```python
+# Create criterion once and reuse
+_EVAL_CRITERION = nn.CrossEntropyLoss(reduction="sum")
+
+def eval_split(...):
+    criterion = _EVAL_CRITERION
+    # ... rest of function
+```
+
+**Expected Savings**: ~0.1-0.2% per epoch (small but free win)
+
+---
+
+### 2.5 torch.compile Settings 🚀
+
+**Current**: `compile_mode = "max-autotune"` (Config line 453)
+
+**Issue**: `max-autotune` can be unstable on some models and may increase compilation time significantly.
+
+**Recommendation**:
+```python
+compile_mode: Optional[str] = "reduce-overhead"  # More stable, still fast
+```
+
+**Trade-offs**:
+- `max-autotune`: Best performance but longer compile, may be unstable
+- `reduce-overhead`: Good performance, stable, faster compile
+- `default`: Balanced, safest option
+
+**For tuning**: Use `"reduce-overhead"` to avoid compilation overhead per trial.
+
+---
+
+## 3. Best Practices & Code Quality
+
+### 3.1 Hyperparameter Documentation ✅ **GOOD**
+
+**Positive**: Excellent documentation of hyperparameters in Config dataclass.
+
+**Suggestion**: Add expected ranges and units to docstrings:
+```python
+batch_size: int = 4096  # Range: 1024-16384, typically 2^N for GPU efficiency
+learning_rate: float = 5e-4  # Range: 1e-5 to 1e-2, scale with batch size
+dropout: float = 0.25  # Range: 0.1-0.5, higher for larger models
+```
+
+---
+
+### 3.2 Magic Numbers in Code ⚠️
+
+**Issue**: Several hard-coded values without explanation.
+
+**Examples**:
+- `leak_threshold=0.3` (line 1697, 1707) - why 0.3?
+- `leak_threshold=0.3` in eval_split calls (line 2799, 354)
+- `threshold=0.5` for file-level evaluation (line 2806)
+
+**Recommendation**: Add to Config dataclass:
+```python
+# === THRESHOLD CONFIGURATION ===
+segment_leak_threshold: float = 0.3  # Segment-level leak detection threshold
+file_leak_threshold: float = 0.5     # File-level voting threshold (paper-exact)
+```
+
+---
+
+### 3.3 Error Handling in Data Loading 🛡️
+
+**Current**: Basic try-except in checkpoint loading, but data loading has minimal error handling.
+
+**Recommendation**: Add validation:
+```python
+def setup_datasets(cfg: Config):
+    # Add existence checks
+    if not cfg.train_h5.exists():
+        raise FileNotFoundError(f"Training dataset not found: {cfg.train_h5}")
+    if not cfg.val_h5.exists():
+        raise FileNotFoundError(f"Validation dataset not found: {cfg.val_h5}")
+
+    # Validate HDF5 integrity
+    with h5py.File(cfg.train_h5, "r") as f:
+        if HDF5_SEGMENTS_KEY not in f:
+            raise ValueError(f"Invalid HDF5: missing '{HDF5_SEGMENTS_KEY}' key")
+        if HDF5_LABELS_KEY not in f:
+            raise ValueError(f"Invalid HDF5: missing '{HDF5_LABELS_KEY}' key")
+
+    # ... rest of function
+```
+
+---
+
+## 4. dataset_tuner.py Review
+
+### 4.1 Tuning Configuration ✅ **GOOD**
+
+**Positive**:
+- Good hyperparameter search spaces
+- Proper use of Optuna TPE sampler
+- MedianPruner for early stopping
+- Batch size scaling for learning rate
+
+### 4.2 Issues Found
+
+#### 4.2.1 Insufficient Tuning Epochs
+
+**Current**: `max_epochs_per_trial = 20` (line 122)
+
+**Issue**: With slow convergence (as seen in user's log), 20 epochs may be insufficient to evaluate a trial properly.
+
+**Recommendation**:
+```python
+max_epochs_per_trial: int = 30  # Increase from 20 to 30
+min_epochs_per_trial: int = 10  # Increase from 5 to 10 (before pruning)
+```
+
+#### 4.2.2 Batch Size Search Space
+
+**Current**: `[4096, 6144, 8192, 10240]` (line 170)
+
+**Issue**: All batch sizes are very large. For imbalanced learning, smaller batches often work better.
+
+**Recommendation**:
+```python
+cfg.batch_size = trial.suggest_categorical("batch_size", [2048, 4096, 6144, 8192])
+```
+
+#### 4.2.3 Missing Hyperparameters
+
+**Not Currently Tuned**:
+- `leak_weight_boost` (critical for imbalanced learning!)
+- `leak_oversample_factor` (directly impacts class balance)
+- `warmup_epochs` (affects early training stability)
+
+**Recommendation**: Add to `suggest_hyperparameters()`:
+```python
+# Class balancing
+cfg.leak_weight_boost = trial.suggest_float("leak_weight_boost", 5.0, 15.0, step=2.5)
+cfg.leak_oversample_factor = trial.suggest_categorical("leak_oversample_factor", [2, 4, 6, 8])
+
+# Training stability
+cfg.warmup_epochs = trial.suggest_int("warmup_epochs", 0, 10, step=2)
+```
+
+#### 4.2.4 Diagnostic Output Compatibility
+
+**Issue**: The new diagnostic output from `eval_split()` returns extra keys (`leak_tp`, `leak_fp`, etc.) which may not be expected by tuner code.
+
+**Fix**: Update tuner's validation code (line 347-359):
+```python
+val_metrics = eval_split(
+    model=train_model,
+    loader=val_loader,
+    device=device,
+    leak_idx=leak_idx,
+    use_channels_last=cfg.use_channels_last,
+    max_batches=None,
+    leak_threshold=0.3
+)
+
+val_f1 = val_metrics["leak_f1"]
+val_acc = val_metrics["acc"]
+
+# Log diagnostic info if F1 is low (optional)
+if val_f1 < 0.1:
+    logger.warning(
+        f"Low F1 in trial {trial.number}: "
+        f"TP={val_metrics.get('leak_tp', 0)}, "
+        f"FP={val_metrics.get('leak_fp', 0)}, "
+        f"FN={val_metrics.get('leak_fn', 0)}"
+    )
+```
+
+---
+
+## 5. Recommended Immediate Actions
+
+### Priority 1: Fix Model Collapse (CRITICAL)
+
+1. **Update Config in dataset_trainer.py**:
+   ```python
+   batch_size: int = 4096              # From 8192
+   learning_rate: float = 5e-4         # From 1e-3
+   warmup_epochs: int = 5              # From 3
+   leak_weight_boost: float = 10.0     # From 5.0
+   leak_aux_weight: float = 0.8        # From 0.5
+   leak_oversample_factor: int = 4     # From 2
+   grad_clip_norm: Optional[float] = 0.5  # From 1.0
+   ```
+
+2. **Run training with new settings** and monitor for:
+   - Training accuracy should vary (not stuck at 60.75%)
+   - Loss should decrease more significantly
+   - F1 score should be > 0.0 by epoch 5
+   - New diagnostic output will show what's happening
+
+### Priority 2: Performance Optimizations
+
+3. **Update DataLoader settings**:
+   ```python
+   num_workers: int = 16        # From 12
+   prefetch_factor: int = 8     # From 4
+   ```
+
+4. **Change compile mode**:
+   ```python
+   compile_mode: Optional[str] = "reduce-overhead"  # From "max-autotune"
+   ```
+
+### Priority 3: Tuner Improvements
+
+5. **Update dataset_tuner.py search spaces**:
+   - Add leak_weight_boost tuning
+   - Add leak_oversample_factor tuning
+   - Reduce batch size search space
+   - Increase max_epochs_per_trial to 30
+
+---
+
+## 6. Testing Plan
+
+### 6.1 Validate Diagnostic Output
+
+**Test**: Run training for 5 epochs and verify diagnostic output appears when F1=0.0
+
+**Expected**: Should see detailed confusion matrix and diagnosis messages
+
+### 6.2 Verify Model Convergence
+
+**Test**: Run training with new hyperparameters for 20 epochs
+
+**Success Criteria**:
+- Training accuracy varies (not stuck)
+- Loss decreases steadily
+- F1 score > 0.1 by epoch 10
+- F1 score > 0.3 by epoch 20
+
+### 6.3 Performance Benchmarking
+
+**Test**: Compare training throughput before/after DataLoader changes
+
+**Metric**: Batches per second, GPU utilization consistency
+
+**Expected**: 5-10% improvement in throughput
+
+---
+
+## 7. Long-Term Recommendations
+
+### 7.1 Add Learning Rate Finder
+
+Add functionality to automatically find optimal learning rate:
+```python
+# Based on Leslie Smith's LR range test
+def find_learning_rate(model, train_loader, min_lr=1e-6, max_lr=1e-2, num_steps=100):
+    """Find optimal learning rate using LR range test."""
+    # Implementation...
+```
+
+### 7.2 Add Early Stopping on Validation Loss
+
+**Current**: Early stopping based on F1 only
+
+**Issue**: If F1 is 0.0 for many epochs, early stopping doesn't trigger
+
+**Recommendation**: Add secondary early stopping on validation loss:
+```python
+if no_improve_f1 >= cfg.early_stop_patience // 2:  # Half patience for loss
+    if val_loss_increasing_for_n_epochs >= 5:
+        logger.warning("Early stopping: validation loss increasing")
+        break
+```
+
+### 7.3 Add Model Checkpointing on Loss Improvement
+
+**Current**: Only best F1 model is saved
+
+**Issue**: If F1=0.0 throughout training, no "best" model is saved
+
+**Recommendation**: Also save best loss model as fallback
+
+### 7.4 Implement Curriculum Learning
+
+For severely imbalanced datasets, consider curriculum learning:
+1. Start with balanced batch sampling (equal samples per class)
+2. Gradually transition to natural distribution
+3. May help model learn LEAK features before seeing class imbalance
+
+---
+
+## 8. Summary of Changes Made
+
+### Files Modified
+
+1. **AI_DEV/dataset_trainer.py** (1 change):
+   - Enhanced `eval_split()` function with comprehensive F1 diagnostics (lines 1691-1851)
+
+### Changes Applied
+
+✅ **Added F1 diagnostic logging**:
+- Confusion matrix (TP, FP, FN, TN)
+- Leak probability distribution
+- Per-class prediction distribution
+- Specific diagnosis for common failure modes
+- Extra metrics in return dict for external analysis
+
+### Changes Recommended (Not Applied)
+
+The following changes are RECOMMENDED but NOT applied to allow user review:
+
+⏸️ **Config hyperparameter adjustments** (dataset_trainer.py):
+- Reduce batch_size to 4096
+- Reduce learning_rate to 5e-4
+- Increase leak_weight_boost to 10.0
+- Increase leak_aux_weight to 0.8
+- Increase leak_oversample_factor to 4
+- Increase warmup_epochs to 5
+- Reduce grad_clip_norm to 0.5
+- Increase num_workers to 16
+- Increase prefetch_factor to 8
+- Change compile_mode to "reduce-overhead"
+
+⏸️ **Tuner improvements** (dataset_tuner.py):
+- Add leak_weight_boost to search space
+- Add leak_oversample_factor to search space
+- Reduce batch_size search space
+- Increase max_epochs_per_trial to 30
+- Increase min_epochs_per_trial to 10
+
+**Reason for not applying**: These are hyperparameter changes that significantly affect training behavior. User should review and approve before applying.
+
+---
+
+## 9. Conclusion
+
+The primary issue causing F1=0.0 is **model collapse** due to severe class imbalance. The model is failing to learn LEAK class features and is likely predicting a majority class for all samples.
+
+**Root causes**:
+1. Class weighting insufficient for extreme imbalance
+2. Batch size too large (averaging out minority class gradients)
+3. Learning rate may be suboptimal
+4. Insufficient oversampling of LEAK class
+
+**Applied fix**:
+- Comprehensive diagnostic logging to identify exact failure mode
+
+**Recommended fixes**:
+- Reduce batch size to 4096
+- Increase LEAK class weighting (10x boost, 4x oversampling)
+- Reduce and tune learning rate
+- Increase warmup period
+- Optimize DataLoader for better GPU utilization
+
+**Next steps**:
+1. Run training with diagnostic logging to confirm diagnosis
+2. Apply recommended hyperparameter changes
+3. Re-run tuning with expanded search space including class balancing parameters
+
+The diagnostic improvements will immediately help identify the problem, while the hyperparameter changes should resolve the underlying model collapse issue.
+
+---
+
+## Appendix A: Code Metrics
+
+### dataset_trainer.py
+- **Lines**: ~3000+
+- **Complexity**: High (training pipeline, data loading, checkpointing)
+- **Test Coverage**: None (recommend adding unit tests)
+- **Documentation**: Excellent (comprehensive docstrings)
+
+### dataset_tuner.py
+- **Lines**: 594
+- **Complexity**: Medium (Optuna integration)
+- **Test Coverage**: None
+- **Documentation**: Good (clear comments)
+
+### Performance Characteristics
+- **Training speed**: ~45-50 batch/s (RTX 5090)
+- **GPU utilization**: 79-91% (variable, can be improved)
+- **VRAM usage**: 98.5% (near maximum, could be optimized)
+- **RAM usage**: 24.4% (significant headroom for optimization)
+- **Disk I/O**: Preloading eliminates bottleneck ✓
+
+---
+
+**Review Complete** ✓
+**Status**: Diagnostic improvements applied, hyperparameter recommendations provided
+**Reviewer**: Claude
+**Date**: 2025-11-21
