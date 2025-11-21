@@ -1715,16 +1715,20 @@ def eval_split(model: nn.Module,
     leak_fn = 0
     leak_tn = 0
 
-    # Diagnostic accumulators for F1 debugging
-    all_leak_probs = []  # Sample of leak probabilities for distribution analysis
-    all_leak_logits = []  # Sample of raw leak logits for debugging
-    all_cls_logits = []  # Sample of classification logits
-    all_preds_dist = []  # Per-class prediction distribution
-    all_labels_dist = []  # Per-class label distribution
+    # Diagnostic accumulators for F1 debugging (sample multiple batches for representative stats)
+    all_leak_probs_aux = []  # Leak probability from auxiliary head: sigmoid(leak_logit)
+    all_leak_probs_cls = []  # Leak probability from classification head: softmax(logits)[leak_idx]
+    all_leak_logits = []  # Raw leak logits from auxiliary head
+    all_cls_logits = []  # Classification logits (all classes)
     pred_count_by_class = {}
     label_count_by_class = {}
 
+    # Track statistics per batch to detect variation
+    per_batch_leak_probs = []  # Mean leak prob per batch
+    per_batch_agreement = []  # Agreement between aux head and cls head
+
     batches_processed = 0
+    DIAGNOSTIC_SAMPLE_BATCHES = 10  # Sample first 10 batches for representative statistics
     with torch.inference_mode(), torch.amp.autocast('cuda'):
         for mel_batch, labels in loader:
             # Use helper function for consistent mel preparation
@@ -1738,15 +1742,37 @@ def eval_split(model: nn.Module,
             correct_count += (preds == labels).sum()  # Keep on GPU
 
             # Compute leak predictions using configurable threshold (lower for imbalanced data)
-            leak_probs = torch.sigmoid(leak_logit)
-            leak_preds = (leak_probs >= leak_threshold).float()
+            # Get leak probability from BOTH heads for comparison
+            leak_probs_aux = torch.sigmoid(leak_logit)  # Auxiliary head probability
+            leak_probs_cls = torch.softmax(logits, dim=1)[:, leak_idx]  # Classification head probability
+
+            leak_preds = (leak_probs_aux >= leak_threshold).float()
             leak_targets = (labels == leak_idx).float()
 
-            # Sample logits from first batch for debugging (100 samples)
-            if batches_processed == 0:
+            # Collect diagnostic data from multiple batches (sample first 10 batches for representative stats)
+            if batches_processed < DIAGNOSTIC_SAMPLE_BATCHES:
                 sample_size = min(100, logits.size(0))
-                all_leak_logits = leak_logit[:sample_size].cpu().tolist()
-                all_cls_logits = logits[:sample_size, :].cpu().tolist()
+
+                # Collect leak probabilities from both heads
+                all_leak_probs_aux.extend(leak_probs_aux[:sample_size].cpu().tolist())
+                all_leak_probs_cls.extend(leak_probs_cls[:sample_size].cpu().tolist())
+                all_leak_logits.extend(leak_logit[:sample_size].cpu().tolist())
+
+                # Collect classification logits
+                if batches_processed == 0:  # Only first batch to avoid memory
+                    all_cls_logits = logits[:sample_size, :].cpu().tolist()
+
+                # Track per-batch statistics
+                batch_mean_prob_aux = leak_probs_aux.mean().item()
+                batch_mean_prob_cls = leak_probs_cls.mean().item()
+                per_batch_leak_probs.append((batch_mean_prob_aux, batch_mean_prob_cls))
+
+                # Compute agreement between auxiliary and classification heads
+                # Agreement: do both heads predict the same class (LEAK vs NOLEAK)?
+                aux_pred = (leak_probs_aux >= 0.5).long()  # Auxiliary head prediction
+                cls_pred = (leak_probs_cls >= 0.5).long()  # Classification head prediction
+                agreement = (aux_pred == cls_pred).float().mean().item()
+                per_batch_agreement.append(agreement)
 
             # Accumulate confusion matrix on CPU
             leak_tp += int(((leak_preds == 1) & (leak_targets == 1)).sum().item())
@@ -1754,11 +1780,8 @@ def eval_split(model: nn.Module,
             leak_fn += int(((leak_preds == 0) & (leak_targets == 1)).sum().item())
             leak_tn += int(((leak_preds == 0) & (leak_targets == 0)).sum().item())
 
-            # Collect diagnostic data (sample only first batch to avoid memory issues)
+            # Count predictions and labels by class (first batch only)
             if batches_processed == 0:
-                all_leak_probs = leak_probs.detach().cpu().numpy()[:100].tolist()  # First 100 samples
-
-                # Count predictions and labels by class
                 preds_np = preds.cpu().numpy()
                 labels_np = labels.cpu().numpy()
                 for c in range(logits.size(1)):
@@ -1801,27 +1824,94 @@ def eval_split(model: nn.Module,
         logger.warning(f"{YELLOW}  Predicted LEAK samples: {total_pred_leaks:6d} / {total:6d} ({100*total_pred_leaks/max(total,1):.2f}%){RESET}")
         logger.warning(f"{YELLOW}  Leak threshold:         {leak_threshold:.3f}{RESET}")
 
-        # Log leak probability distribution
-        if all_leak_probs:
+        # Log leak probability distribution from BOTH heads
+        if all_leak_probs_aux and all_leak_probs_cls:
             import statistics
-            mean_prob = statistics.mean(all_leak_probs)
-            median_prob = statistics.median(all_leak_probs)
-            min_prob = min(all_leak_probs)
-            max_prob = max(all_leak_probs)
-            std_prob = statistics.stdev(all_leak_probs) if len(all_leak_probs) > 1 else 0
-            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Leak Probability Distribution (first batch sample):{RESET}")
-            logger.warning(f"{YELLOW}  Mean:   {mean_prob:.4f}{RESET}")
-            logger.warning(f"{YELLOW}  Median: {median_prob:.4f}{RESET}")
-            logger.warning(f"{YELLOW}  Min:    {min_prob:.4f}{RESET}")
-            logger.warning(f"{YELLOW}  Max:    {max_prob:.4f}{RESET}")
-            logger.warning(f"{YELLOW}  Std:    {std_prob:.4f}{RESET}")
 
-            # Add histogram to show distribution
-            hist, bins = np.histogram(all_leak_probs, bins=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-            logger.warning(f"{YELLOW}  Histogram (leak probability bins):{RESET}")
+            # Auxiliary head statistics
+            mean_aux = statistics.mean(all_leak_probs_aux)
+            median_aux = statistics.median(all_leak_probs_aux)
+            min_aux = min(all_leak_probs_aux)
+            max_aux = max(all_leak_probs_aux)
+            std_aux = statistics.stdev(all_leak_probs_aux) if len(all_leak_probs_aux) > 1 else 0
+
+            # Classification head statistics
+            mean_cls = statistics.mean(all_leak_probs_cls)
+            median_cls = statistics.median(all_leak_probs_cls)
+            min_cls = min(all_leak_probs_cls)
+            max_cls = max(all_leak_probs_cls)
+            std_cls = statistics.stdev(all_leak_probs_cls) if len(all_leak_probs_cls) > 1 else 0
+
+            # Percentiles for auxiliary head
+            sorted_aux = sorted(all_leak_probs_aux)
+            n = len(sorted_aux)
+            p10_aux = sorted_aux[int(0.10 * n)] if n > 0 else 0
+            p25_aux = sorted_aux[int(0.25 * n)] if n > 0 else 0
+            p75_aux = sorted_aux[int(0.75 * n)] if n > 0 else 0
+            p90_aux = sorted_aux[int(0.90 * n)] if n > 0 else 0
+
+            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Leak Probability Distribution (sampled {len(all_leak_probs_aux)} samples from {DIAGNOSTIC_SAMPLE_BATCHES} batches):{RESET}")
+            logger.warning(f"{YELLOW}  {'Metric':<15} {'Auxiliary Head':<20} {'Classification Head':<20}{RESET}")
+            logger.warning(f"{YELLOW}  {'-'*15} {'-'*20} {'-'*20}{RESET}")
+            logger.warning(f"{YELLOW}  {'Mean':<15} {mean_aux:>20.4f} {mean_cls:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'Median':<15} {median_aux:>20.4f} {median_cls:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'Std':<15} {std_aux:>20.4f} {std_cls:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'Min':<15} {min_aux:>20.4f} {min_cls:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'P10':<15} {p10_aux:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'P25':<15} {p25_aux:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'P75':<15} {p75_aux:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'P90':<15} {p90_aux:>20.4f}{RESET}")
+            logger.warning(f"{YELLOW}  {'Max':<15} {max_aux:>20.4f} {max_cls:>20.4f}{RESET}")
+
+            # Correlation between auxiliary and classification heads
+            if len(all_leak_probs_aux) == len(all_leak_probs_cls):
+                import numpy as np
+                corr = np.corrcoef(all_leak_probs_aux, all_leak_probs_cls)[0, 1]
+                logger.warning(f"{YELLOW}  Correlation (aux↔cls): {corr:.4f} (1.0 = perfect agreement){RESET}")
+
+            # Per-batch variation
+            if per_batch_leak_probs:
+                logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Per-Batch Variation (first {len(per_batch_leak_probs)} batches):{RESET}")
+                for i, (aux_mean, cls_mean) in enumerate(per_batch_leak_probs):
+                    agreement = per_batch_agreement[i] if i < len(per_batch_agreement) else 0
+                    logger.warning(f"{YELLOW}  Batch {i}: Aux={aux_mean:.4f}, Cls={cls_mean:.4f}, Agreement={agreement:.2%}{RESET}")
+
+            # Add histogram for auxiliary head (used for threshold decisions)
+            hist, bins = np.histogram(all_leak_probs_aux, bins=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+            logger.warning(f"{YELLOW}  Auxiliary Head Histogram (probability bins):{RESET}")
             for i in range(len(hist)):
-                pct = (hist[i] / len(all_leak_probs) * 100) if len(all_leak_probs) > 0 else 0
+                pct = (hist[i] / len(all_leak_probs_aux) * 100) if len(all_leak_probs_aux) > 0 else 0
                 logger.warning(f"{YELLOW}    [{bins[i]:.1f}-{bins[i+1]:.1f}): {hist[i]:5d} ({pct:5.2f}%){RESET}")
+
+            # Diagnostic: Check threshold appropriateness
+            pct_below_threshold = sum(1 for p in all_leak_probs_aux if p < leak_threshold) / len(all_leak_probs_aux) * 100
+            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Threshold Analysis:{RESET}")
+            logger.warning(f"{YELLOW}  Current threshold: {leak_threshold:.3f}{RESET}")
+            logger.warning(f"{YELLOW}  Samples below threshold: {pct_below_threshold:.1f}%{RESET}")
+            logger.warning(f"{YELLOW}  Samples above threshold: {100-pct_below_threshold:.1f}%{RESET}")
+
+            # Threshold recommendation based on distribution
+            if mean_aux < leak_threshold - 0.05:
+                optimal_threshold = max(0.3, p75_aux)  # Use 75th percentile or 0.3, whichever is higher
+                logger.warning(f"{YELLOW}  ⚠️  Threshold may be TOO HIGH! Mean={mean_aux:.3f} << Threshold={leak_threshold:.3f}{RESET}")
+                logger.warning(f"{YELLOW}  ⚠️  Recommendation: Lower threshold to {optimal_threshold:.3f} (P75) to improve recall{RESET}")
+                logger.warning(f"{YELLOW}  ⚠️  This would predict ~25% as LEAK (closer to actual {100*total_actual_leaks/max(total,1):.1f}%){RESET}")
+            elif mean_aux > leak_threshold + 0.05:
+                logger.warning(f"{YELLOW}  ⚠️  Threshold may be TOO LOW! Mean={mean_aux:.3f} >> Threshold={leak_threshold:.3f}{RESET}")
+                logger.warning(f"{YELLOW}  ⚠️  Model may be over-predicting LEAKs{RESET}")
+
+            # Check if model is well-calibrated
+            if abs(mean_aux - (total_actual_leaks / total)) < 0.05:
+                logger.warning(f"{YELLOW}  ✓ Model outputs are CALIBRATED to class frequency ({mean_aux:.3f} ≈ {total_actual_leaks/total:.3f}){RESET}")
+                logger.warning(f"{YELLOW}    But model may not have learned discriminative features (check std={std_aux:.3f}){RESET}")
+            else:
+                logger.warning(f"{YELLOW}  Model outputs NOT calibrated: mean={mean_aux:.3f}, actual={total_actual_leaks/total:.3f}{RESET}")
+
+            # Check if auxiliary and classification heads agree
+            if 'corr' in locals() and corr < 0.5:
+                logger.warning(f"{YELLOW}  ⚠️  HEADS DISAGREE! Correlation={corr:.3f} < 0.5{RESET}")
+                logger.warning(f"{YELLOW}  ⚠️  Auxiliary head and classification head are learning different signals{RESET}")
+                logger.warning(f"{YELLOW}  ⚠️  Consider: (1) Reduce leak_aux_weight, (2) Disable auxiliary head, (3) Check loss balance{RESET}")
 
         # Log raw logits for debugging model collapse
         if all_leak_logits:
