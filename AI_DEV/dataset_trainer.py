@@ -814,6 +814,252 @@ class GPUProfiler:
         return report
 
 
+class TimingProfiler:
+    """
+    Cumulative timing profiler for GPU operation analysis.
+
+    Tracks time spent in different phases of training/evaluation:
+    - data_loading: DataLoader iterator time (CPU→GPU data pipeline)
+    - data_transfer: CPU→GPU memory transfer
+    - forward: Model forward pass
+    - loss: Loss computation
+    - backward: Backpropagation
+    - optimizer: Optimizer step (including gradient clipping)
+    - eval: Evaluation/validation
+    - metrics: Metric computation and logging
+    - other: Unaccounted time
+
+    Usage:
+        profiler = TimingProfiler(device=torch.device('cuda'))
+
+        # Option 1: Context manager (recommended)
+        with profiler.time('forward'):
+            outputs = model(inputs)
+
+        # Option 2: Manual start/stop
+        profiler.start_timer('loss')
+        loss = criterion(outputs, targets)
+        profiler.stop_timer('loss')
+
+        # Generate report
+        print(profiler.report())
+    """
+
+    def __init__(self, device: torch.device, enabled: bool = True):
+        self.device = device
+        self.enabled = enabled
+        self.timers: Dict[str, float] = {}  # Cumulative time per operation
+        self.counts: Dict[str, int] = {}  # Number of calls per operation
+        self.active_timer: Optional[str] = None
+        self.timer_start: float = 0.0
+        self.epoch_start: float = 0.0
+        self.epoch_end: float = 0.0
+
+        # Initialize all operation types
+        self.operation_types = [
+            'data_loading',
+            'data_transfer',
+            'forward',
+            'loss',
+            'backward',
+            'optimizer',
+            'eval',
+            'metrics',
+            'other'
+        ]
+        self.reset()
+
+    def reset(self):
+        """Reset all timers."""
+        self.timers = {op: 0.0 for op in self.operation_types}
+        self.counts = {op: 0 for op in self.operation_types}
+        self.active_timer = None
+        self.timer_start = 0.0
+        self.epoch_start = 0.0
+        self.epoch_end = 0.0
+
+    def start_epoch(self):
+        """Mark start of epoch."""
+        if self.enabled:
+            self.epoch_start = time.perf_counter()
+
+    def end_epoch(self):
+        """Mark end of epoch."""
+        if self.enabled:
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
+            self.epoch_end = time.perf_counter()
+
+    def start_timer(self, operation: str):
+        """Start timing an operation."""
+        if not self.enabled:
+            return
+
+        if operation not in self.operation_types:
+            logger.warning(f"Unknown operation type: {operation}, adding to 'other'")
+            operation = 'other'
+
+        # Sync GPU before timing for accuracy
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+
+        self.active_timer = operation
+        self.timer_start = time.perf_counter()
+
+    def stop_timer(self, operation: str):
+        """Stop timing an operation."""
+        if not self.enabled:
+            return
+
+        if operation not in self.operation_types:
+            operation = 'other'
+
+        # Sync GPU before recording time
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+
+        elapsed = time.perf_counter() - self.timer_start
+        self.timers[operation] += elapsed
+        self.counts[operation] += 1
+        self.active_timer = None
+
+    def time(self, operation: str):
+        """Context manager for timing operations."""
+        return TimingContext(self, operation)
+
+    def get_total_time(self) -> float:
+        """Get total measured time across all operations."""
+        return sum(self.timers.values())
+
+    def get_epoch_time(self) -> float:
+        """Get total epoch time (wall-clock)."""
+        if self.epoch_start > 0 and self.epoch_end > 0:
+            return self.epoch_end - self.epoch_start
+        return 0.0
+
+    def report(self, phase: str = "TRAINING") -> str:
+        """
+        Generate detailed timing report with bottleneck identification.
+
+        Args:
+            phase: Phase name (e.g., "TRAINING", "VALIDATION")
+
+        Returns:
+            Formatted timing report string
+        """
+        if not self.enabled or self.get_total_time() == 0:
+            return "Timing profiler disabled or no data collected"
+
+        total_measured = self.get_total_time()
+        epoch_time = self.get_epoch_time()
+
+        # If we have epoch timing, use it as reference; otherwise use measured total
+        if epoch_time > 0:
+            total_ref = epoch_time
+            unaccounted = max(0, epoch_time - total_measured)
+        else:
+            total_ref = total_measured
+            unaccounted = 0
+
+        lines = []
+        lines.append(f"\n{'='*80}")
+        lines.append(f"[{phase} TIMING PROFILE]")
+
+        if epoch_time > 0:
+            lines.append(f"Total epoch time (wall-clock): {epoch_time:.3f}s")
+            lines.append(f"Total measured time: {total_measured:.3f}s")
+            if unaccounted > 0.1:
+                lines.append(f"Unaccounted time: {unaccounted:.3f}s ({unaccounted/epoch_time*100:.1f}%)")
+        else:
+            lines.append(f"Total measured time: {total_measured:.3f}s")
+
+        lines.append(f"\n{'Operation':<20} {'Time (s)':<12} {'%':<8} {'Calls':<8} {'Avg (ms)':<12}")
+        lines.append("-" * 80)
+
+        # Sort by time descending
+        sorted_ops = sorted(
+            [(op, t, self.counts[op]) for op, t in self.timers.items() if t > 0],
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        bottlenecks = []
+        for op, op_time, count in sorted_ops:
+            pct = (op_time / total_ref) * 100
+            avg_ms = (op_time / count * 1000) if count > 0 else 0
+
+            # Identify bottlenecks (>25% of total time)
+            if pct > 25:
+                bottlenecks.append((op, pct))
+
+            lines.append(
+                f"{op:<20} {op_time:>11.3f} {pct:>7.1f} {count:>7d} {avg_ms:>11.2f}"
+            )
+
+        # Bottleneck warnings
+        if bottlenecks:
+            lines.append(f"\n{YELLOW}⚠️  BOTTLENECK WARNINGS:{RESET}")
+            for op, pct in bottlenecks:
+                lines.append(f"{YELLOW}  - {op}: {pct:.1f}% of total time{RESET}")
+
+                # Provide specific recommendations
+                if op == 'data_loading':
+                    lines.append(f"{YELLOW}    → Increase num_workers or prefetch_factor{RESET}")
+                    lines.append(f"{YELLOW}    → Enable preload_to_ram if memory allows{RESET}")
+                elif op == 'data_transfer':
+                    lines.append(f"{YELLOW}    → Use pin_memory=True in DataLoader{RESET}")
+                    lines.append(f"{YELLOW}    → Verify non_blocking=True for .to(device){RESET}")
+                elif op == 'forward':
+                    lines.append(f"{YELLOW}    → Consider increasing batch_size{RESET}")
+                    lines.append(f"{YELLOW}    → Enable torch.compile if not already{RESET}")
+                elif op == 'backward':
+                    lines.append(f"{YELLOW}    → Check gradient checkpointing{RESET}")
+                    lines.append(f"{YELLOW}    → Verify mixed precision is enabled{RESET}")
+                elif op == 'optimizer':
+                    lines.append(f"{YELLOW}    → Consider fused optimizer (torch.optim with fused=True){RESET}")
+                elif op == 'eval':
+                    lines.append(f"{YELLOW}    → Reduce validation frequency{RESET}")
+                    lines.append(f"{YELLOW}    → Use max_batches for faster validation{RESET}")
+        else:
+            lines.append(f"\n{GREEN}✓ No major bottlenecks detected{RESET}")
+
+        # GPU utilization analysis
+        if epoch_time > 0:
+            gpu_compute_time = self.timers.get('forward', 0) + self.timers.get('backward', 0) + self.timers.get('loss', 0)
+            gpu_utilization_est = (gpu_compute_time / epoch_time) * 100
+
+            lines.append(f"\n[GPU UTILIZATION ESTIMATE]")
+            lines.append(f"GPU compute time: {gpu_compute_time:.3f}s ({gpu_utilization_est:.1f}% of epoch)")
+
+            if gpu_utilization_est < 50:
+                lines.append(f"{YELLOW}⚠️  LOW GPU UTILIZATION! GPU idle {100-gpu_utilization_est:.1f}% of time{RESET}")
+                lines.append(f"{YELLOW}  → Primary bottleneck is likely CPU-side (data loading/transfer){RESET}")
+            elif gpu_utilization_est > 80:
+                lines.append(f"{GREEN}✓ HIGH GPU UTILIZATION - Efficient training{RESET}")
+            else:
+                lines.append(f"  Moderate GPU utilization")
+
+        lines.append("=" * 80)
+
+        return "\n".join(lines)
+
+
+class TimingContext:
+    """Context manager for TimingProfiler."""
+
+    def __init__(self, profiler: TimingProfiler, operation: str):
+        self.profiler = profiler
+        self.operation = operation
+
+    def __enter__(self):
+        self.profiler.start_timer(self.operation)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.profiler.stop_timer(self.operation)
+        return False
+
+
 def get_rng_state_safe() -> Dict:
     """
     Capture complete RNG state for checkpoint saving.
@@ -1689,7 +1935,8 @@ def eval_split(model: nn.Module,
                leak_idx: int,
                use_channels_last: bool,
                max_batches: Optional[int] = None,
-               leak_threshold: float = 0.3) -> Dict[str, float]:
+               leak_threshold: float = 0.3,
+               timing_profiler: Optional[TimingProfiler] = None) -> Dict[str, float]:
     """Evaluate model on segment-level data.
 
     Args:
@@ -1704,6 +1951,11 @@ def eval_split(model: nn.Module,
     Returns:
         Dictionary with loss, accuracy, and leak metrics
     """
+    # Start evaluation timing
+    if timing_profiler:
+        timing_profiler.reset()
+        timing_profiler.start_epoch()
+
     model.eval()
     criterion = nn.CrossEntropyLoss(reduction="sum")
     total_loss = 0.0
@@ -1732,11 +1984,31 @@ def eval_split(model: nn.Module,
     DIAGNOSTIC_SAMPLE_BATCHES = 10  # Sample first 10 batches for representative statistics
     with torch.inference_mode(), torch.amp.autocast('cuda'):
         for mel_batch, labels in loader:
-            # Use helper function for consistent mel preparation
+            # Data transfer
+            if timing_profiler:
+                timing_profiler.start_timer('data_transfer')
             mel_batch = prepare_mel_batch(mel_batch, device, use_channels_last)
             labels = labels.to(device, non_blocking=True)
+            if timing_profiler:
+                timing_profiler.stop_timer('data_transfer')
+
+            # Forward pass
+            if timing_profiler:
+                timing_profiler.start_timer('forward')
             logits, leak_logit = model(mel_batch)
+            if timing_profiler:
+                timing_profiler.stop_timer('forward')
+
+            # Loss computation
+            if timing_profiler:
+                timing_profiler.start_timer('loss')
             loss = criterion(logits, labels)
+            if timing_profiler:
+                timing_profiler.stop_timer('loss')
+
+            # Metrics computation
+            if timing_profiler:
+                timing_profiler.start_timer('metrics')
             total_loss += loss.item()  # Already float, no need for float()
             total += labels.size(0)
             preds = logits.argmax(dim=1)
@@ -1783,6 +2055,8 @@ def eval_split(model: nn.Module,
             leak_fp += int(((leak_preds == 1) & (leak_targets == 0)).sum().item())
             leak_fn += int(((leak_preds == 0) & (leak_targets == 1)).sum().item())
             leak_tn += int(((leak_preds == 0) & (leak_targets == 0)).sum().item())
+            if timing_profiler:
+                timing_profiler.stop_timer('metrics')
 
             # Count predictions and labels by class (first batch only)
             if batches_processed == 0:
@@ -1994,6 +2268,12 @@ def eval_split(model: nn.Module,
             logger.warning(f"{YELLOW}  - F1 score is undefined without positive samples{RESET}")
 
         logger.warning(f"{YELLOW}{'='*80}{RESET}")
+
+    # Generate comprehensive timing report
+    if timing_profiler:
+        timing_profiler.end_epoch()
+        timing_report = timing_profiler.report(phase="VALIDATION")
+        logger.info(timing_report)
 
     return {
         "loss": avg_loss,
@@ -2297,19 +2577,25 @@ def train_one_epoch(
     freq_mask: Optional[nn.Module],
     interrupted: Dict[str, bool],
     sys_monitor: SystemMonitor,
-    profiler: Optional[GPUProfiler]
+    profiler: Optional[GPUProfiler],
+    timing_profiler: Optional[TimingProfiler] = None
 ) -> Tuple[float, float]:
     """
     Train for one epoch.
-    
+
     Returns:
         Tuple of (train_loss, train_acc)
     """
+    # Start epoch timing
+    if timing_profiler:
+        timing_profiler.reset()
+        timing_profiler.start_epoch()
+
     model.train()  # type: ignore[attr-defined]
     running_loss = torch.tensor(0.0, device=device, dtype=torch.float32)  # Accumulate on GPU
     correct_count = torch.tensor(0, device=device, dtype=torch.int64)  # Accumulate on GPU
     seen = 0
-    
+
     # Reuse pre-created monitors (passed as arguments, no initialization overhead)
     
     pbar = tqdm(
@@ -2343,6 +2629,10 @@ def train_one_epoch(
         iter_time = time.perf_counter() - prev_batch_end
         if batch_idx > 0:  # Skip first batch (includes warmup)
             dataloader_times.append(iter_time)
+            # Track cumulative data loading time
+            if timing_profiler:
+                timing_profiler.timers['data_loading'] += iter_time
+                timing_profiler.counts['data_loading'] += 1
 
             # Detect and log DataLoader spikes for debugging
             iter_time_ms = iter_time * 1000
@@ -2370,8 +2660,12 @@ def train_one_epoch(
 
         # Prepare inputs (non_blocking allows GPU to work while CPU prepares next batch)
         t0 = time.perf_counter() if profile_timing else 0
+        if timing_profiler:
+            timing_profiler.start_timer('data_transfer')
         mel_batch = prepare_mel_batch(mel_batch, device, cfg.use_channels_last)
         labels = labels.to(device, non_blocking=True)
+        if timing_profiler:
+            timing_profiler.stop_timer('data_transfer')
         if profile_timing:
             torch.cuda.synchronize()  # Wait for data transfer
             t_data_transfer = time.perf_counter() - t0
@@ -2398,14 +2692,20 @@ def train_one_epoch(
 
         # Forward pass
         t1 = time.perf_counter() if profile_timing else 0
+        if timing_profiler:
+            timing_profiler.start_timer('forward')
         with torch.amp.autocast('cuda'):
             logits, leak_logit = model(mel_batch)
+            if timing_profiler:
+                timing_profiler.stop_timer('forward')
             if profile_timing:
                 torch.cuda.synchronize()
                 t_forward = time.perf_counter() - t1
 
             # Loss computation
             t2 = time.perf_counter() if profile_timing else 0
+            if timing_profiler:
+                timing_profiler.start_timer('loss')
             loss_cls = cls_loss_fn(logits, labels)
 
             if cfg.use_leak_aux_head:
@@ -2429,6 +2729,8 @@ def train_one_epoch(
                 loss = loss_cls + cfg.leak_aux_weight * loss_leak
             else:
                 loss = loss_cls
+            if timing_profiler:
+                timing_profiler.stop_timer('loss')
             if profile_timing:
                 torch.cuda.synchronize()
                 t_loss = time.perf_counter() - t2
@@ -2438,19 +2740,27 @@ def train_one_epoch(
 
         # Backward pass
         t3 = time.perf_counter() if profile_timing else 0
+        if timing_profiler:
+            timing_profiler.start_timer('backward')
         scaler.scale(loss).backward()
+        if timing_profiler:
+            timing_profiler.stop_timer('backward')
         if profile_timing:
             torch.cuda.synchronize()
             t_backward = time.perf_counter() - t3
 
         # Only step optimizer after accumulating gradients
         t4 = time.perf_counter() if profile_timing else 0
+        if timing_profiler:
+            timing_profiler.start_timer('optimizer')
         if not is_accum_step:
             if cfg.grad_clip_norm is not None:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_norm)  # type: ignore[attr-defined]
             scaler.step(optimizer)
             scaler.update()
+        if timing_profiler:
+            timing_profiler.stop_timer('optimizer')
         if profile_timing:
             torch.cuda.synchronize()
             t_optimizer = time.perf_counter() - t4
@@ -2598,6 +2908,12 @@ def train_one_epoch(
         logger.warning("%s   - Increase num_workers (current: %d)%s", YELLOW, cfg.num_workers, RESET)
         logger.warning("%s   - Increase prefetch_factor (current: %d)%s", YELLOW, cfg.prefetch_factor, RESET)
         logger.warning("%s   - Check DataLoader timing above%s", YELLOW, RESET)
+
+    # Generate comprehensive timing report
+    if timing_profiler:
+        timing_profiler.end_epoch()
+        timing_report = timing_profiler.report(phase="TRAINING")
+        logger.info(timing_report)
 
     return train_loss, train_acc
 
@@ -3163,20 +3479,25 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
     if profiler:
         profiler.start()
 
+    # Create timing profiler for GPU utilization diagnostics
+    timing_profiler = TimingProfiler(device, enabled=cfg.profile_performance)
+
     no_improve = 0
     for epoch in range(start_epoch, cfg.epochs + 1):
         train_sampler.on_epoch_start(epoch)
-        
+
         train_loss, train_acc = train_one_epoch(
             epoch, model, train_loader, optimizer, scaler,
             cls_loss_fn, leak_bce, cfg, leak_idx, model_leak_idx, device,
-            use_ta, time_mask, freq_mask, interrupted, sys_monitor, profiler
+            use_ta, time_mask, freq_mask, interrupted, sys_monitor, profiler,
+            timing_profiler
         )
 
         # CRITICAL: Use model_leak_idx for binary mode (1) instead of leak_idx (2)
         # After BinaryLabelDataset wrapping, labels are 0/1, not 0-4
         metrics = eval_split(model, val_loader, device, model_leak_idx, cfg.use_channels_last,
-                            max_batches=None, leak_threshold=cfg.leak_threshold)
+                            max_batches=None, leak_threshold=cfg.leak_threshold,
+                            timing_profiler=timing_profiler)
         val_loss = metrics["loss"]
         val_acc = metrics["acc"]
         seg_leak_f1 = metrics.get("leak_f1", -1.0)

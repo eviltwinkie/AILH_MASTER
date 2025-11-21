@@ -376,7 +376,8 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                 leak_idx=model_leak_idx,  # FIX: Use model_leak_idx (1 for binary, leak_idx for multi-class)
                 use_channels_last=cfg.use_channels_last,
                 max_batches=None,  # Use full validation set (validation is not shuffled, sampling can miss LEAK!)
-                leak_threshold=cfg.leak_threshold  # Tuned threshold for optimal precision/recall balance
+                leak_threshold=cfg.leak_threshold,  # Tuned threshold for optimal precision/recall balance
+                timing_profiler=None  # Disable timing profiler during tuning for speed
             )
             
             val_f1 = val_metrics["leak_f1"]
