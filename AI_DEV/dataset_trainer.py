@@ -173,7 +173,8 @@ _CHECKPOINT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ckp
 # ======================================================================
 
 # Set TRAINER_LOG_LEVEL=DEBUG in your environment for deep diagnostics.
-LOG_LEVEL = os.environ.get("TRAINER_LOG_LEVEL", "INFO").upper()
+# FORCED TO DEBUG for comprehensive diagnostics during troubleshooting
+LOG_LEVEL = os.environ.get("TRAINER_LOG_LEVEL", "DEBUG").upper()
 
 # Custom formatter to show elapsed time instead of timestamp
 class ElapsedTimeFormatter(logging.Formatter):
