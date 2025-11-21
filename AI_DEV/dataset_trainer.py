@@ -426,7 +426,7 @@ class Config:
     focal_gamma: float = 2.0            # Focal loss focusing parameter (if loss_type="focal")
     focal_alpha_leak: float = 0.75      # Focal loss weight for leak class (others: (1-α)/(C-1))
     # Extra emphasis for leak class in binary weighted CE
-    leak_weight_boost: float = 2.0      # Multiplier for LEAK class weight in binary weighted CE
+    leak_weight_boost: float = 5.0      # Multiplier for LEAK class weight in binary weighted CE (increased to prevent model collapse)
 
     # ========== AUXILIARY LEAK DETECTION HEAD ==========
     use_leak_aux_head: bool = True      # Enable binary leak-vs-rest auxiliary head
