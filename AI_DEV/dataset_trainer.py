@@ -1747,7 +1747,10 @@ def eval_split(model: nn.Module,
             leak_probs_aux = torch.sigmoid(leak_logit)  # Auxiliary head probability
             leak_probs_cls = torch.softmax(logits, dim=1)[:, leak_idx]  # Classification head probability
 
-            leak_preds = (leak_probs_aux >= leak_threshold).float()
+            # Use CLASSIFICATION head for predictions (not auxiliary)
+            # Diagnostics show classification head learns discriminative features (mean=0.62, std=0.011)
+            # while auxiliary head stays stuck at class prior (mean=0.44, std=0.006)
+            leak_preds = (leak_probs_cls >= leak_threshold).float()
             leak_targets = (labels == leak_idx).float()
 
             # Collect diagnostic data from multiple batches (sample first 10 batches for representative stats)
@@ -1877,36 +1880,56 @@ def eval_split(model: nn.Module,
                     agreement = per_batch_agreement[i] if i < len(per_batch_agreement) else 0
                     logger.warning(f"{YELLOW}  Batch {i}: Aux={aux_mean:.4f}, Cls={cls_mean:.4f}, Agreement={agreement:.2%}{RESET}")
 
-            # Add histogram for auxiliary head (used for threshold decisions)
-            hist, bins = np.histogram(all_leak_probs_aux, bins=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-            logger.warning(f"{YELLOW}  Auxiliary Head Histogram (probability bins):{RESET}")
-            for i in range(len(hist)):
-                pct = (hist[i] / len(all_leak_probs_aux) * 100) if len(all_leak_probs_aux) > 0 else 0
-                logger.warning(f"{YELLOW}    [{bins[i]:.1f}-{bins[i+1]:.1f}): {hist[i]:5d} ({pct:5.2f}%){RESET}")
+            # Add histogram for CLASSIFICATION head (used for threshold decisions)
+            hist_cls, bins_cls = np.histogram(all_leak_probs_cls, bins=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+            logger.warning(f"{YELLOW}  Classification Head Histogram (probability bins - USED FOR PREDICTIONS):{RESET}")
+            for i in range(len(hist_cls)):
+                pct = (hist_cls[i] / len(all_leak_probs_cls) * 100) if len(all_leak_probs_cls) > 0 else 0
+                logger.warning(f"{YELLOW}    [{bins_cls[i]:.1f}-{bins_cls[i+1]:.1f}): {hist_cls[i]:5d} ({pct:5.2f}%){RESET}")
 
-            # Diagnostic: Check threshold appropriateness
-            pct_below_threshold = sum(1 for p in all_leak_probs_aux if p < leak_threshold) / len(all_leak_probs_aux) * 100
-            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Threshold Analysis:{RESET}")
+            # Show auxiliary head histogram for comparison
+            hist_aux, bins_aux = np.histogram(all_leak_probs_aux, bins=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+            logger.warning(f"{YELLOW}  Auxiliary Head Histogram (for reference only):{RESET}")
+            for i in range(len(hist_aux)):
+                pct = (hist_aux[i] / len(all_leak_probs_aux) * 100) if len(all_leak_probs_aux) > 0 else 0
+                logger.warning(f"{YELLOW}    [{bins_aux[i]:.1f}-{bins_aux[i+1]:.1f}): {hist_aux[i]:5d} ({pct:5.2f}%){RESET}")
+
+            # Diagnostic: Check threshold appropriateness (USING CLASSIFICATION HEAD)
+            pct_below_threshold = sum(1 for p in all_leak_probs_cls if p < leak_threshold) / len(all_leak_probs_cls) * 100
+            logger.warning(f"{YELLOW}[F1 DIAGNOSTIC] Threshold Analysis (Classification Head):{RESET}")
             logger.warning(f"{YELLOW}  Current threshold: {leak_threshold:.3f}{RESET}")
             logger.warning(f"{YELLOW}  Samples below threshold: {pct_below_threshold:.1f}%{RESET}")
             logger.warning(f"{YELLOW}  Samples above threshold: {100-pct_below_threshold:.1f}%{RESET}")
 
-            # Threshold recommendation based on distribution
-            if mean_aux < leak_threshold - 0.05:
-                optimal_threshold = max(0.3, p75_aux)  # Use 75th percentile or 0.3, whichever is higher
-                logger.warning(f"{YELLOW}  ⚠️  Threshold may be TOO HIGH! Mean={mean_aux:.3f} << Threshold={leak_threshold:.3f}{RESET}")
+            # Calculate percentiles for classification head
+            sorted_cls = sorted(all_leak_probs_cls)
+            n_cls = len(sorted_cls)
+            p75_cls = sorted_cls[int(0.75 * n_cls)] if n_cls > 0 else 0
+            p50_cls = sorted_cls[int(0.50 * n_cls)] if n_cls > 0 else 0
+
+            # Threshold recommendation based on CLASSIFICATION head distribution
+            if mean_cls < leak_threshold - 0.05:
+                optimal_threshold = max(0.3, p75_cls)  # Use 75th percentile or 0.3, whichever is higher
+                logger.warning(f"{YELLOW}  ⚠️  Threshold may be TOO HIGH! Mean={mean_cls:.3f} << Threshold={leak_threshold:.3f}{RESET}")
                 logger.warning(f"{YELLOW}  ⚠️  Recommendation: Lower threshold to {optimal_threshold:.3f} (P75) to improve recall{RESET}")
                 logger.warning(f"{YELLOW}  ⚠️  This would predict ~25% as LEAK (closer to actual {100*total_actual_leaks/max(total,1):.1f}%){RESET}")
-            elif mean_aux > leak_threshold + 0.05:
-                logger.warning(f"{YELLOW}  ⚠️  Threshold may be TOO LOW! Mean={mean_aux:.3f} >> Threshold={leak_threshold:.3f}{RESET}")
+            elif mean_cls > leak_threshold + 0.05:
+                logger.warning(f"{YELLOW}  ⚠️  Threshold may be TOO LOW! Mean={mean_cls:.3f} >> Threshold={leak_threshold:.3f}{RESET}")
                 logger.warning(f"{YELLOW}  ⚠️  Model may be over-predicting LEAKs{RESET}")
-
-            # Check if model is well-calibrated
-            if abs(mean_aux - (total_actual_leaks / total)) < 0.05:
-                logger.warning(f"{YELLOW}  ✓ Model outputs are CALIBRATED to class frequency ({mean_aux:.3f} ≈ {total_actual_leaks/total:.3f}){RESET}")
-                logger.warning(f"{YELLOW}    But model may not have learned discriminative features (check std={std_aux:.3f}){RESET}")
             else:
-                logger.warning(f"{YELLOW}  Model outputs NOT calibrated: mean={mean_aux:.3f}, actual={total_actual_leaks/total:.3f}{RESET}")
+                logger.warning(f"{YELLOW}  ✓ Threshold appears appropriate: mean={mean_cls:.3f} ≈ threshold={leak_threshold:.3f}{RESET}")
+
+            # Check calibration of CLASSIFICATION head
+            if abs(mean_cls - (total_actual_leaks / total)) < 0.05:
+                logger.warning(f"{YELLOW}  ✓ Classification head CALIBRATED to class frequency ({mean_cls:.3f} ≈ {total_actual_leaks/total:.3f}){RESET}")
+            else:
+                logger.warning(f"{YELLOW}  Classification head outputs: mean={mean_cls:.3f}, actual class freq={total_actual_leaks/total:.3f} (Δ={abs(mean_cls - total_actual_leaks/total):.3f}){RESET}")
+
+            # Comment on discriminative ability
+            if std_cls > 0.05:
+                logger.warning(f"{YELLOW}  ✓ Good discrimination! Std={std_cls:.3f} shows model learned features{RESET}")
+            else:
+                logger.warning(f"{YELLOW}  ⚠️  Low discrimination: std={std_cls:.3f} - model may not have learned discriminative features{RESET}")
 
             # Check if auxiliary and classification heads agree
             if 'corr' in locals() and corr < 0.5:
