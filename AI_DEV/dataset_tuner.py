@@ -400,8 +400,21 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
             if no_improve_count >= cfg.early_stop_patience:
                 logger.info(f"Early stopping at epoch {epoch}")
                 break
-            
-            scheduler.step()
+
+            # LR scheduling with optional warmup
+            # During warmup: linearly increase LR from 0 to base_lr
+            # After warmup: apply cosine annealing decay
+            if cfg.warmup_epochs > 0 and epoch <= cfg.warmup_epochs:
+                # Linear warmup: LR = base_lr * (epoch / warmup_epochs)
+                warmup_factor = epoch / float(max(1, cfg.warmup_epochs))
+                for pg in optimizer.param_groups:
+                    pg['lr'] = cfg.learning_rate * warmup_factor
+                logger.debug("Warmup LR epoch %d/%d: factor=%.3f, lr=%.6e",
+                            epoch, cfg.warmup_epochs, warmup_factor, optimizer.param_groups[0]['lr'])
+            else:
+                # After warmup: apply cosine annealing
+                scheduler.step()
+                logger.debug("Cosine LR epoch %d: lr=%.6e", epoch, optimizer.param_groups[0]['lr'])
         
         trial_elapsed = time.time() - trial_start
         logger.info(
