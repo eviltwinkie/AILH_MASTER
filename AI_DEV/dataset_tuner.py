@@ -308,11 +308,11 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
         best_val_f1 = 0.0
         no_improve_count = 0
         model_leak_idx = 1 if cfg.binary_mode else leak_idx
-        
+
         for epoch in range(1, cfg.epochs + 1):
             # Reset sampler for new epoch
             train_sampler.on_epoch_start(epoch)
-            
+
             # Train
             train_loss, train_acc = train_one_epoch(
                 epoch=epoch,
@@ -333,7 +333,7 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                 sys_monitor=sys_monitor,
                 profiler=profiler
             )
-            
+
             # Debug: Check if model parameters are changing
             if epoch == 1:
                 final_params = torch.cat([p.flatten() for p in model.parameters()]).detach().cpu()
@@ -342,13 +342,15 @@ def objective(trial: Trial, base_cfg: Config, tuning_cfg: TuningConfig) -> float
                 if param_diff < 1e-6:
                     logger.warning(f"{YELLOW}Trial {trial.number}: Model parameters barely changed! Learning may have failed.{RESET}")
                     # Don't return 0.0 immediately, let it continue to see if it improves
-            
+
             # Validate (full segment-level evaluation for tuning)
+            # CRITICAL: Use model_leak_idx for binary mode (1) instead of leak_idx (2)
+            # After BinaryLabelDataset wrapping, labels are 0/1, not 0-4
             val_metrics = eval_split(
                 model=train_model,
                 loader=val_loader,
                 device=device,
-                leak_idx=leak_idx,
+                leak_idx=model_leak_idx,  # FIX: Use model_leak_idx (1 for binary, leak_idx for multi-class)
                 use_channels_last=cfg.use_channels_last,
                 max_batches=None,  # Evaluate entire validation set to avoid missing LEAK class
                 leak_threshold=0.3  # Lower threshold for imbalanced data
