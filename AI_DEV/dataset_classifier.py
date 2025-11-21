@@ -197,33 +197,40 @@ def two_stage_segments(x: np.ndarray, long_window: int, short_window: int) -> Tu
 
 class LeakCNNMulti(nn.Module):
     """
-    Feature trunk -> (multiclass logits, aux leak logit)
-    Lightweight trunk to remain compatible with training defaults.
+    Dual-head CNN for leak detection with auxiliary binary classification.
+    
+    Supports two modes:
+    - Binary mode (n_classes=2): LEAK vs NOLEAK classification
+    - Multi-class mode (n_classes=5): BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED
+    
+    Architecture matches dataset_trainer.py exactly.
     """
     def __init__(self, n_classes: int, dropout: float = 0.25):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-        self.pool1 = nn.MaxPool2d((2,1), (2,1))
-        self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
-        self.pool2 = nn.MaxPool2d((2,1), (2,1))
-        self.drop  = nn.Dropout(dropout)
-        self.adapt = nn.AdaptiveAvgPool2d((16,1))
-        self.fc1   = nn.Linear(128*16*1, 256)
-        self.cls   = nn.Linear(256, n_classes)
-        self.leak  = nn.Linear(256, 1)
+        self.n_classes = n_classes
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.pool1 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.pool2 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+        self.dropout = nn.Dropout(dropout)
+        self.adapt = nn.AdaptiveAvgPool2d((16, 1))
+        self.fc1 = nn.Linear(128 * 16 * 1, 256)
+        self.cls_head = nn.Linear(256, n_classes)
+        self.leak_head = nn.Linear(256, 1)
 
-    def forward(self, mel_db: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        mel_db: [B, 1, n_mels, t_frames] (channels_last ok)
+        x: [B, 1, n_mels, t_frames] (channels_last ok)
         """
-        x = F.relu(self.conv1(mel_db))
-        x = self.pool1(F.relu(self.conv2(x)))
-        x = self.pool2(F.relu(self.conv3(x)))
-        x = self.adapt(x)
-        x = torch.flatten(x, 1)
-        x = self.drop(F.relu(self.fc1(x)))
-        return self.cls(x), self.leak(x).squeeze(1)
+        x = F.relu(self.conv1(x)); x = F.relu(self.conv2(x)); x = self.pool1(x)
+        x = F.relu(self.conv3(x)); x = self.pool2(x)
+        x = self.adapt(x); x = torch.flatten(x, 1)
+        x = self.dropout(x)
+        x = F.relu(self.fc1(x))
+        logits = self.cls_head(x)
+        leak_logit = self.leak_head(x).squeeze(1)
+        return logits, leak_logit
 
 # ------------------------ Inference helpers ------------------------
 
@@ -267,8 +274,12 @@ def load_weights_and_meta(model_dir: Path, n_classes: int, device: torch.device)
         except Exception as e:
             print(f"[WARN] Could not load metadata: {e}")
     
+    # Get dropout from metadata, fallback to default
+    dropout = meta.get('trainer_cfg', {}).get('dropout', 0.25)
+    print(f"[MODEL] Using dropout={dropout} from metadata")
+    
     # Initialize model
-    model = LeakCNNMulti(n_classes=n_classes, dropout=0.25)
+    model = LeakCNNMulti(n_classes=n_classes, dropout=dropout)
     model = model.to(device)
     model = model.to(memory_format=torch.channels_last)  # type: ignore[call-overload]
     model = model.eval()
@@ -397,20 +408,42 @@ def main():
     # Determine model type and paths
     if args.model_binary:
         model_type = "binary"
-        n_classes = 2
-        class_names = ["LEAK", "NOLEAK"]
     else:  # model_multi
         model_type = "multiclass"
-        n_classes = 5
-        class_names = ["BACKGROUND", "CRACK", "LEAK", "NORMAL", "UNCLASSIFIED"]
     
     model_dir = Path(PROC_MODELS) / model_type
     stage_dir = Path(args.stage_dir) if args.stage_dir else Path(DATASET_TRAINING)
     
+    # Load model metadata first to get correct class names and parameters
+    meta_path = model_dir / "model_meta.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r") as f:
+                temp_meta = json.load(f)
+            class_names = temp_meta.get("class_names", [])
+            n_classes = temp_meta.get("num_classes", len(class_names))
+            print(f"[CONFIG] Loaded class_names from metadata: {class_names}")
+        except Exception as e:
+            print(f"[WARN] Could not load metadata: {e}, using defaults")
+            if args.model_binary:
+                class_names = ["LEAK", "NOLEAK"]  # fallback
+                n_classes = 2
+            else:
+                class_names = ["BACKGROUND", "CRACK", "LEAK", "NORMAL", "UNCLASSIFIED"]  # fallback
+                n_classes = 5
+    else:
+        print(f"[WARN] No metadata found, using defaults")
+        if args.model_binary:
+            class_names = ["LEAK", "NOLEAK"]  # fallback
+            n_classes = 2
+        else:
+            class_names = ["BACKGROUND", "CRACK", "LEAK", "NORMAL", "UNCLASSIFIED"]  # fallback
+            n_classes = 5
+    
     print(f"[CONFIG] Model type: {model_type}")
     print(f"[CONFIG] Model directory: {model_dir}")
     print(f"[CONFIG] Stage directory: {stage_dir}")
-    print(f"[CONFIG] Classes: {class_names}")
+    print(f"[CONFIG] Classes: {class_names} ({n_classes} total)")
     
     # Load builder config
     cfg = load_builder_config(stage_dir)
@@ -426,10 +459,15 @@ def main():
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
     
-    # Get leak index
-    leak_idx = class_names.index("LEAK")
-    if leak_idx != 2 and model_type == "multiclass":  # LEAK should be at index 2 for multiclass
-        print(f"[INFO] LEAK is at index {leak_idx} (expected 2 for multiclass)", file=sys.stderr)
+    # Get leak index from metadata (not hardcoded)
+    leak_idx = meta.get("leak_idx", class_names.index("LEAK") if "LEAK" in class_names else 0)
+    print(f"[CONFIG] Using leak_idx={leak_idx} from model metadata")
+    
+    # Verify leak index is reasonable
+    if leak_idx >= n_classes:
+        print(f"[WARN] leak_idx={leak_idx} >= n_classes={n_classes}, using class_names.index('LEAK')")
+        leak_idx = class_names.index("LEAK") if "LEAK" in class_names else 0
+        print(f"[CONFIG] Corrected leak_idx={leak_idx}")
     
     # Collect files
     if args.in_dir:
