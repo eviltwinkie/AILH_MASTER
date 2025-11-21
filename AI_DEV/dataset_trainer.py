@@ -3021,15 +3021,19 @@ def run_training_loop(cfg: Config, model, train_loader: DataLoader, val_loader: 
                    seg_leak_f1, val_file_acc, file_leak_f1, file_leak_p, file_leak_r)
 
         # LR scheduling with optional warmup
-        # Always step scheduler to keep state consistent
-        scheduler.step()
-
-        # Apply warmup scaling on top of scheduler if still in warmup period
+        # During warmup: linearly increase LR from 0 to base_lr
+        # After warmup: apply cosine annealing decay
         if cfg.warmup_epochs > 0 and epoch <= cfg.warmup_epochs:
+            # Linear warmup: LR = base_lr * (epoch / warmup_epochs)
             warmup_factor = epoch / float(max(1, cfg.warmup_epochs))
             for pg in optimizer.param_groups:
-                pg['lr'] = pg['lr'] * warmup_factor
-            logger.debug("Warmup LR epoch %d: factor=%.3f, lr=%.6e", epoch, warmup_factor, optimizer.param_groups[0]['lr'])
+                pg['lr'] = cfg.learning_rate * warmup_factor
+            logger.debug("Warmup LR epoch %d/%d: factor=%.3f, lr=%.6e",
+                        epoch, cfg.warmup_epochs, warmup_factor, optimizer.param_groups[0]['lr'])
+        else:
+            # After warmup: apply cosine annealing
+            scheduler.step()
+            logger.debug("Cosine LR epoch %d: lr=%.6e", epoch, optimizer.param_groups[0]['lr'])
         
         save_checkpoint(
             cfg, epoch, model, optimizer, scheduler, scaler, train_sampler,
