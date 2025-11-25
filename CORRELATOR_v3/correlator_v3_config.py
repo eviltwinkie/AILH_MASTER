@@ -2,6 +2,11 @@
 """
 CORRELATOR_V3 Configuration
 Extends CORRELATOR_v2 with physics-aware, Bayesian, AI, and advanced correlation features.
+
+Version: 3.0.0
+Revision: 1
+Date: 2025-11-25
+Status: Production
 """
 
 import os

@@ -2,6 +2,11 @@
 """
 Physics-Aware Correlation Engine
 Joint (position, velocity) search and dispersion-aware modeling
+
+Version: 3.0.0
+Revision: 1
+Date: 2025-11-25
+Status: Production
 """
 
 import numpy as np

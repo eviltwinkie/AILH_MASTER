@@ -2,6 +2,11 @@
 """
 Coherence Analysis and Band Selection
 Compute magnitude-squared coherence and auto-detect leak-relevant frequency bands
+
+Version: 3.0.0
+Revision: 1
+Date: 2025-11-25
+Status: Production
 """
 
 import numpy as np

@@ -2,6 +2,11 @@
 """
 Multiple Correlation Variants
 GCC-PHAT, GCC-Roth, GCC-SCOT, Classical, Wavelet
+
+Version: 3.0.0
+Revision: 1
+Date: 2025-11-25
+Status: Production
 """
 
 import numpy as np
