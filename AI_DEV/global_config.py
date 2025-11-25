@@ -113,9 +113,13 @@ CNN_DENSE = 128
 
 DELIMITER = '~'
 
-# Official label set (5 categories)
-# Ensure your MASTER_DATASET matches this label set before training!
-# See CLAUDE.md "Classification Categories" for full details.
+# The system uses TWO separate AI models (see CLAUDE.md for details)
+# Ensure your MASTER_DATASET matches the appropriate label set before training!
+
+# Model 1: Binary Leak Detection (fast screening)
+BINARY_LABELS = ['LEAK', 'NOLEAK']
+
+# Model 2: Multi-Class Classification (detailed classification)
 DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
 
 # ======================

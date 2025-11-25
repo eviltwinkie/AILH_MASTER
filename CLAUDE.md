@@ -189,25 +189,51 @@ All scripts MUST support the below global variables:
 
 ### Classification Categories
 
-**CRITICAL**: Official label set:
+**CRITICAL**: The system uses TWO separate AI models:
 
-DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
+#### Model 1: Binary Leak Detection
+- **Purpose**: Fast initial screening for leak presence
+- **Labels**: `['LEAK', 'NOLEAK']`
+- **Output**: Binary classification (leak detected / no leak)
+
+#### Model 2: Multi-Class Classification
+- **Purpose**: Detailed acoustic signature classification
+- **Labels**: `['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']`
+- **Output**: Specific acoustic event type
+
+**Typical Workflow**:
+1. Binary model screens all signals for potential leaks
+2. Positive detections go to multi-class model for detailed classification
+3. Multi-class results provide actionable intelligence on leak type and severity
 
 ### Dataset Split
-- **MASTER_DATASET**: 100% - Source of truth (manually labeled)
-- **DATASET_TRAINING**: 70% - Training data
-- **DATASET_VALIDATION**: 20% - Validation data
-- **DATASET_TESTING**: 10% - Testing data
+- **MASTER_DATASET**: 100% - Source of truth (manually labeled with multi-class labels)
+- **DATASET_TRAINING**: 70% - Training data (for both models)
+- **DATASET_VALIDATION**: 20% - Validation data (for both models)
+- **DATASET_TESTING**: 10% - Testing data (for both models)
 - **DATASET_LEARNING**: Incremental learning data (pseudo-labeled + verified)
 - **DATASET_DEV**: Development/testing only (not for production)
 
+**Note**: Both binary and multi-class models use the same dataset splits. For binary training, multi-class labels are collapsed to LEAK/NOLEAK (LEAK remains LEAK, all others become NOLEAK).
+
 ### Data Flow
+
+#### Training Data Pipeline
 1. Raw sensor data → `DATA_SENSORS/`
-2. Manual labeling → `MASTER_DATASET/`
+2. Manual labeling (multi-class) → `MASTER_DATASET/`
 3. Initial split → `DATASET_TRAINING/`, `DATASET_VALIDATION/`, `DATASET_TESTING/`
-4. Model predictions → `DATASET_LEARNING/`
-5. Manual verification → Back to `MASTER_DATASET/`
-6. Reshuffle for next training round
+4. Train both models:
+   - Binary model: Uses collapsed labels (LEAK/NOLEAK)
+   - Multi-class model: Uses full 5 categories
+
+#### Inference Pipeline
+1. New audio signal arrives
+2. Binary model screens for leak presence
+3. If LEAK detected → Multi-class model classifies acoustic signature
+4. Results → `PROC_REPORTS/`
+5. High-confidence predictions → `DATASET_LEARNING/` (for incremental learning)
+6. Manual verification → Back to `MASTER_DATASET/`
+7. Reshuffle for next training round
 
 ---
 
@@ -355,8 +381,10 @@ Voting Mechanism (≥50% segments → leak detected)
 
 ### CNN Architecture (from research paper)
 
+The system uses **two separate CNN models** with the same base architecture but different output layers:
+
+#### Shared Base Architecture
 ```python
-Model: CNN(Mel)
 - Input: Mel spectrogram (n_mels x time_frames)
 - Conv2D: filters=32, kernel_size=(3,3), activation='relu'
 - MaxPooling2D: pool_size=(2,2), strides=(2,2)
@@ -366,8 +394,20 @@ Model: CNN(Mel)
 - GlobalAveragePooling2D
 - Dense: 128, activation='relu'
 - Dropout: 0.25
-- Dense: n_classes, activation='softmax'
+```
 
+#### Model 1: Binary (LEAK/NOLEAK)
+```python
+- Dense: 2, activation='softmax'  # Binary output
+```
+
+#### Model 2: Multi-Class (5 categories)
+```python
+- Dense: 5, activation='softmax'  # 5-class output
+```
+
+#### Training Parameters (Both Models)
+```python
 Optimizer: Adam (learning_rate=0.001)
 Batch Size: 64
 Epochs: 200
