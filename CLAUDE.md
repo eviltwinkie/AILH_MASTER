@@ -58,6 +58,7 @@ The system uses hydrophone sensors to capture acoustic signals from water pipeli
 - **OS**: Windows 11 + WSL2 Ubuntu 24.04
 - **Architecture**: x86_64
 - **CPU**: Intel Core Ultra 9 275HX (24 cores)
+- **RAM**: 94GB
 - **Filesystem**: ext4 (optimized for small files: 24,801.7 files/s @ 2032.8 MB/s)
 
 ### GPU Configuration
