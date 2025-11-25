@@ -76,10 +76,22 @@ AILH_MASTER/
 │   ├── dataset_classifier.py
 │   ├── dataset_trainer.py
 │   ├── dataset_tuner.py
-│   └── ai_builder.py        
+│   └── ai_builder.py
 │
-├── CORRELATOR_V2/                    # 
-│   └── ...             # Correlator v2.0 source code
+├── CORRELATOR_v2/              # Legacy correlation system
+│   └── ...                     # Correlator v2.0 source code
+│
+├── CORRELATOR_v3/              # ⭐ Advanced physics-aware correlation
+│   ├── correlator_v3_config.py         # V3 configuration
+│   ├── physics_aware_correlator.py     # Joint (x,c) search
+│   ├── correlation_variants.py         # 5 correlation methods
+│   ├── coherence_analyzer.py           # Coherence analysis
+│   ├── bayesian_estimator.py           # Bayesian inference
+│   ├── ai_window_gating.py             # AI integration
+│   ├── robust_stacking.py              # Robust stacking
+│   ├── leak_correlator_v3.py           # Main CLI ⭐
+│   ├── README.md                       # V3 documentation
+│   └── examples/                       # Example scripts
 │
 ├── DOCS/                    # Documentation
 │   ├── AILH.md             # Core requirements & specifications
@@ -290,6 +302,85 @@ os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 #### Dataset Management
 - **`dataset_builder.py`**: Build and organize datasets
 
+### CORRELATOR_V3/ Scripts
+
+**Status:** ✅ Production Ready (v3.0 - 2025-11-25)
+
+CORRELATOR_V3 is an advanced leak correlation system integrating physics-aware algorithms, Bayesian inference, AI integration, and multiple correlation methods.
+
+#### Key Features:
+- **Physics-Aware Correlation**: Joint (position, velocity) estimation without assuming wave speed
+- **Multiple Correlation Methods**: GCC-PHAT, GCC-Roth, GCC-SCOT, Classical, Wavelet
+- **Coherence-Driven Band Selection**: Auto-detects leak-relevant frequency bands
+- **Bayesian Position Estimation**: MAP estimates with 95% credible intervals & entropy
+- **AI Level 1 Integration**: Window-level leak classification with adaptive weighting
+- **Robust Stacking**: Weighted trimmed mean, median, Huber M-estimator
+
+#### Core Modules:
+- **`leak_correlator_v3.py`**: Main CLI for leak correlation (⭐ entry point)
+- **`physics_aware_correlator.py`**: Joint search over (x,c) space with dispersion modeling
+- **`bayesian_estimator.py`**: Posterior inference with MAP, credible intervals, entropy
+- **`correlation_variants.py`**: 5 correlation algorithms (GCC variants, classical, wavelet)
+- **`coherence_analyzer.py`**: Magnitude-squared coherence & band selection
+- **`ai_window_gating.py`**: AI-driven adaptive weighting using leak classifier
+- **`robust_stacking.py`**: Outlier-resistant stacking methods
+- **`correlator_v3_config.py`**: V3 configuration with environment variable support
+
+#### Usage Example:
+```bash
+# Full V3 features
+python CORRELATOR_v3/leak_correlator_v3.py \
+    --sensor-a S001~R001~20251125120000~100.wav \
+    --sensor-b S002~R002~20251125120000~100.wav \
+    --registry sensor_registry.json \
+    --output report.json \
+    --physics-aware \
+    --bayesian \
+    --ai-gating \
+    --coherence \
+    --verbose
+
+# Custom correlation methods
+python CORRELATOR_v3/leak_correlator_v3.py \
+    --sensor-a A.wav --sensor-b B.wav \
+    --registry registry.json \
+    --output report.json \
+    --correlation-methods gcc_phat,gcc_scot,wavelet \
+    --stacking-method huber \
+    --verbose
+```
+
+#### Configuration:
+V3 constants are in `AI_DEV/global_config.py` (lines 94-132):
+```python
+# Physics-aware
+V3_VELOCITY_SEARCH_MIN_MPS = 200
+V3_VELOCITY_SEARCH_MAX_MPS = 6000
+
+# Bayesian
+V3_BAYESIAN_PRIOR_STD_M = 50.0
+V3_BAYESIAN_LIKELIHOOD_BETA = 5.0
+
+# AI integration
+V3_AI_WINDOW_SIZE_SEC = 1.0
+V3_AI_LEAK_PROB_EXPONENT = 0.5
+
+# Robust stacking
+V3_TRIMMED_MEAN_PERCENTILE = 0.1
+V3_HUBER_DELTA = 1.35
+```
+
+Environment variables:
+```bash
+export V3_PHYSICS_AWARE=YES
+export V3_BAYESIAN=YES
+export V3_AI_GATING=YES
+export V3_COHERENCE=YES
+export V3_CORRELATION_METHODS=gcc_phat,gcc_scot,wavelet
+```
+
+See `CORRELATOR_v3/README.md` for comprehensive documentation.
+
 ### UTILITIES/ Scripts
 
 - **`test_gpu_cuda.py`**: Comprehensive GPU/CUDA diagnostics
@@ -387,6 +478,43 @@ python UTILITIES/test_disk_tune.py \
     --pattern "*.wav" \
     --verbose
 ```
+
+### 5. CORRELATOR_V3 Leak Detection
+
+```bash
+# Basic V2-compatible usage
+python CORRELATOR_v3/leak_correlator_v3.py \
+    --sensor-a S001~R001~20251125120000~100.wav \
+    --sensor-b S002~R002~20251125120000~100.wav \
+    --registry sensor_registry.json \
+    --output leak_report.json \
+    --verbose
+
+# Advanced V3 features (physics-aware + Bayesian)
+python CORRELATOR_v3/leak_correlator_v3.py \
+    --sensor-a S001~R001~20251125120000~100.wav \
+    --sensor-b S002~R002~20251125120000~100.wav \
+    --registry sensor_registry.json \
+    --output leak_report.json \
+    --physics-aware \
+    --bayesian \
+    --ai-gating \
+    --coherence \
+    --correlation-methods gcc_phat,gcc_scot,wavelet \
+    --stacking-method huber \
+    --verbose
+
+# The output JSON includes:
+# - Sensor pair metadata
+# - Configuration used
+# - AI window gating results (leak confidence)
+# - Coherence analysis (high-coherence frequency bands)
+# - Physics-aware results (optimal position & velocity)
+# - Bayesian estimation (MAP position, credible intervals, entropy)
+# - Final leak detection (position, confidence, wave speed)
+```
+
+See `CORRELATOR_v3/README.md` for detailed usage and examples.
 
 ---
 
@@ -613,6 +741,15 @@ python AI_DEV/cnn_mel_classifier.py --model model.keras --input-dir /audio/files
 
 # Incremental learning
 python AI_DEV/cnn_mel_learner.py --base-model model.keras --learning-dir DATASET_LEARNING
+
+# Correlate sensor pair (V3)
+python CORRELATOR_v3/leak_correlator_v3.py --sensor-a A.wav --sensor-b B.wav \
+    --registry registry.json --output report.json --verbose
+
+# V3 with all features
+python CORRELATOR_v3/leak_correlator_v3.py --sensor-a A.wav --sensor-b B.wav \
+    --registry registry.json --output report.json \
+    --physics-aware --bayesian --ai-gating --coherence
 ```
 
 ---
@@ -635,6 +772,20 @@ python AI_DEV/cnn_mel_learner.py --base-model model.keras --learning-dir DATASET
 
 ## Changelog
 
+### 2025-11-25
+- Added CORRELATOR_V3 advanced leak correlation system
+  - Physics-aware joint (x,c) search with dispersion modeling
+  - Multiple correlation variants: GCC-PHAT, GCC-Roth, GCC-SCOT, Classical, Wavelet
+  - Bayesian posterior inference with MAP, credible intervals, entropy
+  - AI window gating integration (Level 1)
+  - Coherence-driven frequency band selection
+  - Robust stacking methods (trimmed mean, median, Huber M-estimator)
+  - Comprehensive input validation and error handling (11 bugs fixed)
+- Added V3 constants to AI_DEV/global_config.py (lines 94-132)
+- Updated CLAUDE.md to document CORRELATOR_V3
+- Fixed SAMPLE_LENGTH_SEC bug in CORRELATOR_v2/correlator_config.py
+- All V3 modules pass syntax validation and mathematical verification
+
 ### 2025-11-18
 - Initial CLAUDE.md creation
 - Documented complete codebase structure
@@ -645,7 +796,7 @@ python AI_DEV/cnn_mel_learner.py --base-model model.keras --learning-dir DATASET
 
 ---
 
-**Last Updated**: 2025-11-18
+**Last Updated**: 2025-11-25
 **Maintainer**: AILH Development Team
 **Repository**: eviltwinkie/AILH_MASTER
-**Branch**: claude/add-claude-documentation-012RxEwbcA8qApBtvt6XByaN
+**Branch**: claude/build-correlator-v3-01SUJVGAniBmqp1Ykh1qUEJM
