@@ -1,6 +1,7 @@
 # CORRELATOR_V3 - Advanced Leak Correlation System
 
-**Version:** 3.0
+**Version:** 3.0.0
+**Revision:** 1
 **Status:** ✅ PRODUCTION READY
 **Date:** 2025-11-25 13:12 UTC
 **Merged to Main:** 2025-11-25 13:12 UTC
@@ -395,4 +396,4 @@ python leak_correlator_v3.py ... --bayesian --physics-aware --ai-gating
 ---
 
 **Built with ❤️  for the AILH Project**
-**Version 3.0 - Production Ready - Merged to Main: 2025-11-25 13:12 UTC**
+**Version 3.0.0 (Revision 1) - Production Ready - Merged to Main: 2025-11-25 13:12 UTC**

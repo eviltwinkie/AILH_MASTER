@@ -2,6 +2,11 @@
 """
 AI Window Gating
 Leverage existing leak classifier for adaptive window weighting
+
+Version: 3.0.0
+Revision: 1
+Date: 2025-11-25
+Status: Production
 """
 
 import numpy as np
