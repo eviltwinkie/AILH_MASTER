@@ -2,7 +2,8 @@
 
 **Version:** 3.0
 **Status:** ✅ PRODUCTION READY
-**Date:** 2025-11-25
+**Date:** 2025-11-25 13:12 UTC
+**Merged to Main:** 2025-11-25 13:12 UTC
 
 ---
 
@@ -389,9 +390,9 @@ python leak_correlator_v3.py ... --bayesian --physics-aware --ai-gating
 - Main docs: `CLAUDE.md`
 
 **Repository:** eviltwinkie/AILH_MASTER
-**Branch:** claude/build-correlator-v3-01SUJVGAniBmqp1Ykh1qUEJM
+**Branch:** main (merged 2025-11-25 13:12 UTC)
 
 ---
 
 **Built with ❤️  for the AILH Project**
-**Version 3.0 - Production Ready - 2025-11-25**
+**Version 3.0 - Production Ready - Merged to Main: 2025-11-25 13:12 UTC**
