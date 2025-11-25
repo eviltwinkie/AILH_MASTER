@@ -1,16 +1,37 @@
 # AILH_MASTER - AI Acoustic Leak Detection System
 
 ## Table of Contents
-1. [Project Overview](#project-overview)
-2. [Hardware Environment](#hardware-environment)
-3. [Codebase Structure](#codebase-structure)
-4. [Development Guidelines](#development-guidelines)
-5. [Data Organization](#data-organization)
-6. [Configuration Management](#configuration-management)
-7. [Script Types & Purposes](#script-types--purposes)
-8. [Development Workflows](#development-workflows)
-9. [Technical Architecture](#technical-architecture)
-10. [AI Assistant Guidelines](#ai-assistant-guidelines)
+1. [AI Behavior Guidelines](#ai-behavior-guidelines)
+2. [Project Overview](#project-overview)
+3. [Hardware Environment](#hardware-environment)
+4. [Codebase Structure](#codebase-structure)
+5. [Development Guidelines](#development-guidelines)
+6. [Data Organization](#data-organization)
+7. [Configuration Management](#configuration-management)
+8. [Script Types & Purposes](#script-types--purposes)
+9. [Development Workflows](#development-workflows)
+10. [Technical Architecture](#technical-architecture)
+11. [AI Assistant Guidelines](#ai-assistant-guidelines)
+
+---
+
+## AI Behavior Guidelines
+
+**CRITICAL**: When working on this codebase, AI assistants MUST follow these protocols:
+
+### Interaction Protocols
+- **ALWAYS** wait for plan discussion and explicit GO_AHEAD before implementing changes
+- **ALWAYS** ask before committing or pushing to repository
+- **ALWAYS** present information, options, and recommendations for user approval
+- **NEVER** make assumptions about user intent - ask clarifying questions
+- Explain reasoning and trade-offs for technical decisions
+- Provide multiple implementation options when applicable
+
+### Code Quality Standards
+- Follow all guidelines in Development Guidelines section below
+- Test changes before committing
+- Document all modifications with clear commit messages
+- Verify file locations and paths match actual repository structure
 
 ---
 
@@ -62,6 +83,123 @@ The system uses hydrophone sensors to capture acoustic signals from water pipeli
 - **GPU FP16 GEMM**: 73.06 TFLOP/s (NVMath), 17.68 TFLOP/s (PyTorch)
 - **GPU FP8 GEMM**: ~28.6 TFLOP/s
 - **Disk I/O**: 24,801 files/s, 2032 MB/s (small files)
+
+### GPU Acceleration Strategy
+
+The AILH system uses a **hybrid CPU/GPU architecture** to maximize performance across the entire pipeline:
+
+#### Library Usage Guidelines
+
+**NumPy** (CPU - Control Plane):
+- File I/O and WAV loading
+- Metadata, indexing, small CPU-side transforms
+- Pipe graph, positions, configuration data
+- HDF5/memmap dataset building
+
+**CuPy** (GPU - DSP Operations):
+- GPU-accelerated DSP: FFTs, correlations, filters, signal stacking
+- Operations like "FFT + multiply + IFFT" or large array math
+- SciPy-like DSP APIs on GPU via `cupyx.scipy.signal`
+- Raw FFT/correlation performance without gradients
+
+**PyTorch** (GPU - Machine Learning):
+- All ML models: CNNs, leak window classifier, corrgram CNN, correlation referee MLP
+- STFT/Mel feature extraction feeding directly into models
+- Any operations requiring automatic differentiation
+- End-to-end trainable pipelines
+
+**NVMath / cuBLAS** (GPU - High-Performance Computing):
+- Heavy GEMMs and batched FFT operations
+- Maximum FLOP/s for linear algebra
+- Benchmarking and performance-critical sections
+
+**TensorRT** (GPU - Production Inference):
+- Deployed inference for leak CNN + corrgram CNN in production
+- Optimized model execution with INT8/FP16 quantization
+
+#### Pipeline Stage Assignments
+
+| Stage | Library | GPU Accelerated? | Notes |
+|-------|---------|-----------------|-------|
+| WAV load | NumPy + soundfile | ❌ CPU only | File I/O |
+| Resampling | CuPy / cuSignal | ✅ GPU | Signal processing |
+| Filtering (adaptive bandpass) | CuPy / cuSignal | ✅ GPU | DSP operations |
+| Window segmentation | PyTorch | Optional GPU | Tensor ops |
+| STFT / Mel | PyTorch | ✅ GPU | Feature extraction |
+| Leak CNN | PyTorch / TensorRT | ✅ GPU | Model inference |
+| Per-window correlation | CuPy or PyTorch FFT | ✅ GPU | Cross-correlation |
+| Robust stacking | CuPy or PyTorch | Optional GPU | Signal averaging |
+| Corrgram CNN | PyTorch | ✅ GPU | Model inference |
+| Bayesian estimator | PyTorch MLP | Optional GPU | Statistical inference |
+| HDF5 / memmap writer | NumPy + h5py | ❌ CPU only | File I/O |
+| Metadata, configs | NumPy | ❌ CPU only | Control plane |
+
+#### GPU-Accelerated Libraries Available
+
+**Core Array / Math**:
+- CuPy - GPU arrays (NumPy-compatible API)
+- PyTorch - Tensors with autograd
+- JAX - Composable transformations
+- NVMath / cuBLAS / cuFFT / cuSPARSE - Low-level CUDA
+- Numba CUDA - JIT compilation
+- Triton - Custom CUDA kernel generation
+
+**DSP & Signal Processing**:
+- cuSignal / cupyx.scipy.signal - GPU-accelerated scipy.signal
+- torchaudio - Audio processing in PyTorch
+- PyTorch FFT - GPU FFT operations
+
+**Machine Learning**:
+- PyTorch - Primary ML framework
+- TensorRT - Optimized inference
+- cuML (RAPIDS) - GPU scikit-learn algorithms
+
+**DataFrames / ETL**:
+- cuDF (RAPIDS) - GPU-accelerated Pandas
+- Polars GPU Engine - Fast DataFrame operations
+- Dask + CuPy - Distributed GPU arrays
+- cuIO - Fast data loading
+
+**Computer Vision / Imaging** (for visualization):
+- CV-CUDA - GPU OpenCV operations
+- Torchvision - PyTorch vision utilities
+- OpenCV CUDA builds - GPU-accelerated OpenCV
+
+**Graph Algorithms** (for pipe networks):
+- cuGraph (RAPIDS) - GPU graph algorithms
+- PyTorch Geometric - Graph neural networks
+
+**Visualization** (for reports):
+- cuXfilter - GPU dashboards
+- Datashader GPU - Large dataset visualization
+- VisPy - OpenGL-based visualization
+
+**PDE / Simulation** (for acoustic modeling):
+- JAX - Automatic differentiation + GPU
+- Warp (NVIDIA) - Physical simulation
+- PyTorch + Triton - Custom kernels
+
+#### Migration Strategy from SciPy
+
+Traditional SciPy operations can be accelerated:
+
+| SciPy Function | GPU Alternative | Speedup |
+|----------------|----------------|---------|
+| scipy.signal.fft | CuPy FFT / PyTorch FFT | 10-100× |
+| scipy.signal.correlate | CuPy correlate | 20-50× |
+| scipy.signal.filtfilt | cupyx.scipy.signal.filtfilt | 15-40× |
+| scipy.signal.welch | Custom CuPy/PyTorch | 10-30× |
+| scipy.sparse | cupy.sparse | 5-20× |
+| scipy.linalg | cupy.linalg | 10-50× |
+
+#### Performance Optimization Guidelines
+
+1. **Keep data on GPU**: Minimize CPU↔GPU transfers
+2. **Batch operations**: Process multiple signals simultaneously
+3. **Use async transfers**: Overlap computation with I/O
+4. **Profile hotspots**: Use NVIDIA Nsight Systems
+5. **FP16 when possible**: 4× faster than FP32 on tensor cores
+6. **Persistent GPU allocations**: Reuse memory buffers
 
 ---
 
@@ -199,31 +337,97 @@ All scripts MUST support the below global variables:
 - **Error handling**: Robust exception handling and logging
 - **Performance Monitoring**: Always time functions for debugging, add CPU/RAM GPU/VRAM DISK_IO/DISK_READ/DISK_WRITE utilization over time and as summary output
 
+#### 8. Professional Reporting Requirements
+
+All analysis outputs and reports MUST include:
+
+**Executive Summary**:
+- High-level findings and recommendations
+- Detection confidence levels
+- Actionable next steps
+
+**Publication-Quality Graphics**:
+- Spectrograms with leak annotations and markers
+- Correlation plots with confidence intervals and statistical bounds
+- Time-series analysis with trend lines and anomaly markers
+- Multi-sensor visualization (when applicable)
+- Format: PNG (default) + SVG (with `--svg` flag for interactive/publication use)
+
+**Engineering Validation Data**:
+- Detection confidence scores (0.0 - 1.0)
+- SNR (Signal-to-Noise Ratio) measurements in dB
+- Cross-correlation coefficients with peak locations
+- Time-delay estimates with uncertainty bounds
+- Frequency domain analysis (peak frequencies, bandwidth)
+- Sensor metadata (location, timestamp, gain settings, calibration data)
+
+**Export Formats**:
+- **JSON**: Raw data and metrics for further processing
+- **PNG/SVG**: Graphics and visualizations
+- **PDF**: Complete professional reports with graphics + data tables
+- **CSV**: Tabular results for spreadsheet analysis
+
+**Report Structure Template**:
+```
+1. Executive Summary
+2. Sensor Configuration & Metadata
+3. Signal Quality Metrics
+4. Detection Results
+   - Binary Classification (LEAK/NOLEAK)
+   - Multi-Class Classification (if LEAK detected)
+5. Correlation Analysis (for multi-sensor setups)
+6. Visualizations
+7. Engineering Validation Data
+8. Recommendations & Next Steps
+```
+
 ---
 
 ## Data Organization
 
 ### Classification Categories
 
-**CRITICAL**: Active label set:
+**CRITICAL**: The system uses TWO separate AI models with different label sets:
 
-DATA_LABELS = ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
+#### Model 1: Binary Leak Detection
+- **Purpose**: Fast initial screening for leak presence
+- **Labels**: `BINARY_LABELS = ['LEAK', 'NOLEAK']`
+- **Output**: Binary classification (leak detected / no leak detected)
+- **Use Case**: First-stage screening of all incoming acoustic signals
+
+#### Model 2: Multi-Class Classification
+- **Purpose**: Detailed acoustic signature classification
+- **Official Labels**: `DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']`
+- **Output**: Specific acoustic event type with confidence score
+- **Use Case**: Detailed analysis of suspected leak signals
+
+**Typical Workflow**:
+1. Binary model screens all signals for potential leaks
+2. Signals classified as LEAK → Multi-class model for detailed classification
+3. Multi-class results (BACKGROUND, CRACK, LEAK, NORMAL, UNCLASSIFIED) provide actionable intelligence
+4. Engineering reports generated with validation data
 
 ### Dataset Split
-- **MASTER_DATASET**: 100% - Source of truth (manually labeled)
-- **DATASET_TRAINING**: 70% - Training data
-- **DATASET_VALIDATION**: 20% - Validation data
-- **DATASET_TESTING**: 10% - Testing data
+- **MASTER_DATASET**: 100% - Source of truth (manually labeled with 5-class labels)
+- **DATASET_TRAINING**: 70% - Training data (for both binary and multi-class models)
+- **DATASET_VALIDATION**: 20% - Validation data (for both models)
+- **DATASET_TESTING**: 10% - Testing data (for both models)
 - **DATASET_LEARNING**: Incremental learning data (pseudo-labeled + verified)
 - **DATASET_DEV**: Development/testing only (not for production)
 
+**Note**: Binary model training uses MASTER_DATASET with labels collapsed to LEAK/NOLEAK (LEAK remains LEAK, all others become NOLEAK).
+
 ### Data Flow
 1. Raw sensor data → `DATA_SENSORS/`
-2. Manual labeling → `MASTER_DATASET/`
+2. Manual labeling (5-class) → `MASTER_DATASET/`
 3. Initial split → `DATASET_TRAINING/`, `DATASET_VALIDATION/`, `DATASET_TESTING/`
-4. Model predictions → `DATASET_LEARNING/`
-5. Manual verification → Back to `MASTER_DATASET/`
-6. Reshuffle for next training round
+4. Train both models:
+   - Binary model: Uses collapsed labels (LEAK/NOLEAK)
+   - Multi-class model: Uses full 5 categories
+5. Inference: Binary screening → Multi-class classification (if LEAK detected)
+6. High-confidence predictions → `DATASET_LEARNING/`
+7. Manual verification → Back to `MASTER_DATASET/`
+8. Reshuffle for next training round
 
 ---
 
@@ -411,6 +615,109 @@ Epochs: 200
 - **False Positive (FP)**: Bottom 50% lowest probability segments → normal samples
 - **True Negative (TN)**: Bottom 50% lowest probability segments → normal samples
 - **False Negative (FN)**: Top 50% highest probability segments → leak samples
+
+---
+
+### Multi-Sensor Correlation (CORRELATOR_v2)
+
+The leak correlation system supports **multiple sensors**, not just sensor pairs:
+
+#### Sensor Configurations
+
+**2-Sensor Mode** (Standard Pair-wise):
+- Cross-correlation between two hydrophones
+- Time-delay estimation for leak localization
+- Distance calculation along pipeline
+- Minimum viable configuration
+
+**Multi-Sensor Mode** (3+ sensors):
+- Multiple sensors deployed in same pipeline area
+- Enhanced triangulation and localization
+- Spatial filtering for noise rejection
+- Redundancy and validation through sensor agreement
+- Improved confidence through consensus detection
+
+#### Benefits of Multi-Sensor Deployments
+
+- **Improved Accuracy**: Triangulation from multiple positions reduces localization uncertainty
+- **Noise Rejection**: Spatially uncorrelated noise filtered through sensor fusion
+- **Redundancy**: System continues operation if one sensor fails
+- **Validation**: Cross-validation between sensor pairs confirms leak presence
+- **Coverage**: Larger pipeline sections monitored with overlapping detection zones
+
+#### Implementation Notes
+
+- See `CORRELATOR_v2/multi_sensor_triangulation.py` for multi-sensor algorithms
+- See `CORRELATOR_v2/sensor_registry.py` for sensor configuration management
+- Professional reports include multi-sensor visualization when applicable
+
+---
+
+### Signal Stacking (Temporal Enhancement)
+
+For **repeated measurements** from the same sensor pair over time (e.g., hourly 10-second recordings):
+
+#### Purpose
+Enhance Signal-to-Noise Ratio (SNR) by coherently averaging multiple recordings of the same leak signal.
+
+#### Use Case
+- **Scenario**: Days of data from same sensor pair (24 samples/day × N days)
+- **Goal**: Strengthen weak leak signals buried in noise
+- **Method**: Temporal stacking through coherent averaging
+
+#### Implementation Method
+
+```
+1. Signal Alignment:
+   - Perform cross-correlation between recordings
+   - Align signals temporally to compensate for phase shifts
+   - Account for clock drift and timing variations
+
+2. Quality Control:
+   - Reject outlier signals (e.g., >3σ from median SNR)
+   - Verify signal stationarity (leak characteristics stable over stacking period)
+   - Check correlation coefficients (reject poorly correlated signals)
+
+3. Coherent Stacking:
+   - Stack N aligned signals: S_stacked = (1/N) × Σ(S_i)
+   - SNR improvement: √N factor (e.g., 10 signals → 3.16× SNR boost)
+   - Preserve phase information for correlation analysis
+
+4. Validation:
+   - Compare stacked vs. individual signal correlations
+   - Verify SNR improvement matches theoretical √N
+   - Check for artifacts or distortion from stacking
+```
+
+#### Pros & Cons
+
+**Advantages**:
+- ✅ Stronger correlation peaks (easier leak detection)
+- ✅ Better SNR (√N improvement with N signals)
+- ✅ Reduced false positives (noise averaged out)
+- ✅ More confident time-delay estimates
+
+**Limitations**:
+- ⚠️ **Assumes leak signal is stationary** over stacking period
+- ⚠️ Non-stationary leaks (varying flow, intermittent) may degrade
+- ⚠️ Time-varying environmental noise may not average out
+- ⚠️ Requires consistent sensor positions and configurations
+
+#### Recommended Practice
+
+**Best Results**:
+- Stack signals from **same time of day** across multiple days (e.g., 2:00 AM samples for 7 days)
+- Minimizes daily environmental variations (traffic, industrial noise)
+- Works well for steady-state leaks
+
+**Quality Checks**:
+- Verify signal stability before stacking (check correlation between individual signals)
+- Monitor SNR improvement (should approach √N)
+- Compare stacked correlation with individual best case
+
+**Implementation**:
+- See `CORRELATOR_v2/signal_stacking.py` for stacking algorithms
+- Professional reports include stacking statistics and validation metrics
 
 ---
 
