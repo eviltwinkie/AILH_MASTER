@@ -316,85 +316,6 @@ os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 
 ## Development Workflows
 
-### 1. Initial Model Training
-
-```bash
-# Step 1: Prepare MASTER_DATASET with labeled data
-# Ensure data follows naming convention: sensor_id~recording_id~timestamp~gain_db.wav
-
-# Step 2: Shuffle and split data (70/20/10)
-python UTILITIES/shuffle_data_for_training.py \
-    --input /DEVELOPMENT/ROOT_AILH/DATA_STORE/MASTER_DATASET \
-    --output-train /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_TRAINING \
-    --output-valid /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_VALIDATION \
-    --output-test /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_TESTING \
-    --verbose
-
-# Step 3: Train initial model
-python AI_DEV/cnn_mel_trainer.py \
-    --training-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_TRAINING \
-    --validation-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_VALIDATION \
-    --output-model /DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS/initial_model.keras \
-    --epochs 200 \
-    --batch-size 64 \
-    --verbose
-
-# Step 4: Evaluate on test set
-python AI_DEV/cnn_mel_classifier.py \
-    --model /DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS/initial_model.keras \
-    --input-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_TESTING \
-    --output-report /DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_REPORTS/test_results.json \
-    --verbose
-```
-
-### 2. Hyperparameter Tuning
-
-```bash
-# Use automated hyperparameter search
-python AI_DEV/cnn_mel_tuner.py \
-    --training-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_TRAINING \
-    --validation-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_VALIDATION \
-    --tuner keras  # or 'optuna'
-    --max-trials 100 \
-    --verbose
-```
-
-### 3. Incremental Learning
-
-```bash
-# Step 1: Classify new real-world data
-python AI_DEV/cnn_mel_classifier.py \
-    --model /DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS/current_model.keras \
-    --input-dir /DEVELOPMENT/ROOT_AILH/DATA_SENSORS/NEW_BATCH \
-    --output-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_LEARNING \
-    --confidence-threshold 0.8 \
-    --verbose
-
-# Step 2: Manual verification and labeling of predictions
-
-# Step 3: Incremental learning with verified data
-python AI_DEV/cnn_mel_learner.py \
-    --base-model /DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS/current_model.keras \
-    --learning-dir /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_LEARNING \
-    --output-model /DEVELOPMENT/ROOT_AILH/DATA_STORE/PROC_MODELS/updated_model.keras \
-    --confidence-threshold 0.8 \
-    --rounds 2 \
-    --verbose
-```
-
-### 4. GPU Performance Testing
-
-```bash
-# Test GPU/CUDA stack
-python UTILITIES/test_gpu_cuda.py
-
-# Optimize disk I/O
-python UTILITIES/test_disk_tune.py \
-    --root /DEVELOPMENT/ROOT_AILH/DATA_STORE/DATASET_DEV \
-    --pattern "*.wav" \
-    --verbose
-```
-
 ---
 
 ## Technical Architecture
@@ -463,16 +384,6 @@ Epochs: 200
 - **False Positive (FP)**: Bottom 50% lowest probability segments → normal samples
 - **True Negative (TN)**: Bottom 50% lowest probability segments → normal samples
 - **False Negative (FN)**: Top 50% highest probability segments → leak samples
-
-### Performance Metrics
-
-```python
-Accuracy = (TP + TN) / (TP + FP + FN + TN)
-Precision = TP / (TP + FP)
-Sensitivity (Recall) = TP / (TP + FN)
-Specificity = TN / (FP + TN)
-AUC = Area Under ROC Curve
-```
 
 ---
 
@@ -613,13 +524,11 @@ python UTILITIES/normalize_wav_files.py --input /input/dir --output /output/dir
 python UTILITIES/shuffle_data_for_training.py --input MASTER_DATASET --output-train DATASET_TRAINING
 
 # Train model
-python AI_DEV/cnn_mel_trainer.py --training-dir DATASET_TRAINING --validation-dir DATASET_VALIDATION
 
 # Classify audio
-python AI_DEV/cnn_mel_classifier.py --model model.keras --input-dir /audio/files
 
 # Incremental learning
-python AI_DEV/cnn_mel_learner.py --base-model model.keras --learning-dir DATASET_LEARNING
+
 ```
 
 ---
@@ -631,6 +540,7 @@ python AI_DEV/cnn_mel_learner.py --base-model model.keras --learning-dir DATASET
 - **DOCS/OPTIMIZATION_GUIDE.md**: GPU and performance optimization
 - **DOCS/LeakDetectionTwoStageSegmentation.pdf**: Research paper
 - **global_config.py**: Configuration reference
+- **global_vars**: Global Configuration Variables
 
 ### External References
 - TensorFlow Documentation: https://www.tensorflow.org/
@@ -639,20 +549,3 @@ python AI_DEV/cnn_mel_learner.py --base-model model.keras --learning-dir DATASET
 - CuPy Documentation: https://docs.cupy.dev/
 
 ---
-
-## Changelog
-
-### 2025-11-18
-- Initial CLAUDE.md creation
-- Documented complete codebase structure
-- Added comprehensive development guidelines
-- Documented hardware environment and benchmarks
-- Added configuration management section
-- Included AI assistant guidelines
-
----
-
-**Last Updated**: 2025-11-18
-**Maintainer**: AILH Development Team
-**Repository**: eviltwinkie/AILH_MASTER
-**Branch**: claude/add-claude-documentation-012RxEwbcA8qApBtvt6XByaN
