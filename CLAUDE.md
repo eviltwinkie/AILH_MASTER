@@ -70,41 +70,57 @@ The system uses hydrophone sensors to capture acoustic signals from water pipeli
 ### Repository Layout
 ```
 AILH_MASTER/
-├── AI_DEV/                  # Main development scripts
-│   ├── global_config.py         # Global configuration
-│   ├── dataset_builder.py
-│   ├── dataset_classifier.py
-│   ├── dataset_trainer.py
-│   ├── dataset_tuner.py
-│   └── ai_builder.py        
+├── AI_DEV/                  # Main development scripts (6 files)
+│   ├── global_config.py         # ⭐ Global configuration
+│   ├── ai_builder.py            # Optimized GPU-accelerated processing pipeline
+│   ├── dataset_builder.py       # Build and organize datasets
+│   ├── dataset_classifier.py    # Batch classification utilities
+│   ├── dataset_trainer.py       # General dataset training utilities
+│   └── dataset_tuner.py         # Hyperparameter tuning (Keras Tuner / Optuna)
 │
-├── CORRELATOR_V2/                    # 
-│   └── ...             # Correlator v2.0 source code
+├── CORRELATOR_v2/           # Acoustic leak correlation system (17 Python files)
+│   ├── README.md
+│   ├── QUICKSTART.md
+│   ├── leak_correlator.py
+│   ├── correlation_engine.py
+│   ├── batch_gpu_correlator.py
+│   ├── multi_leak_detector.py
+│   ├── sensor_registry.py
+│   ├── visualization.py
+│   ├── examples/
+│   └── ... (additional modules)
 │
-├── DOCS/                    # Documentation
-│   ├── AILH.md             # Core requirements & specifications
-│   ├── ... # All other misc information for loose project guidance 
-│   ├── OPTIMIZATION_GUIDE.md # Misc information
-│   ├── test_disk_tune_results.json # Local system hard drive performance test results/settings
-│   ├── test_disk_tune_results.txt # Local system hard drive performance test results/settings
-│   ├── test_gpu_cuda_results.txt # Local system GPU/CUDA and support/hardware information
-│   └── LeakDetectionTwoStageSegmentation.pdf # Reference information for project guidelines
+├── DOCS/                    # Documentation (33 files)
+│   ├── AILH.md                  # Core requirements & specifications
+│   ├── LeakDetectionTwoStageSegmentation.pdf  # Reference paper
+│   ├── OPTIMIZATION_GUIDE.md
+│   ├── test_disk_tune_results.json
+│   ├── test_disk_tune_results.txt
+│   ├── test_gpu_cuda_results.txt
+│   ├── CODE_REVIEW_*.md         # Code review documents
+│   ├── PERFORMANCE_*.md         # Performance analysis
+│   └── ... (additional documentation)
 │
-├── FCS_TOOLS/               # Field Control System tools
-│   ├── datagate_client.py   # Credential rotation client
-│   └── datagate_sync.py     # Data synchronization
+├── FCS_TOOLS/               # Field Control System tools (2 files)
+│   ├── datagate_client.py       # Credential rotation client
+│   └── datagate_sync.py         # Data synchronization
 │
-├── UTILITIES/               # Utility scripts
-│   ├── gen_requirements.py
-│   ├── ... # Other misc utilities
-│   ├── normalize_wav_files.py
-│   ├── shuffle_data_for_training.py
-│   ├── test_disk_tune.py
-│   ├── test_gpu_cuda.py
-│   ├── test_wav_files.py
-│   └── test_wav_files_v2.py
+├── UTILITIES/               # Utility scripts (17 files)
+│   ├── test_gpu_cuda.py         # GPU/CUDA diagnostics
+│   ├── test_disk_tune.py        # Disk I/O performance tuning
+│   ├── test_wav_files.py        # WAV file validation
+│   ├── test_wav_files_v2.py     # Enhanced WAV validation
+│   ├── normalize_wav_files.py   # WAV file normalization
+│   ├── shuffle_data_for_training.py  # Dataset shuffling
+│   ├── gen_requirements.py      # Generate requirements.txt
+│   ├── dataconv.py              # Data conversion utilities
+│   ├── synthetic_leakgen.py     # Synthetic leak data generator
+│   ├── wav_viewer.py            # WAV file viewer
+│   └── ... (additional utilities)
 │
-└── CLAUDE.md               # This file
+├── .gitignore               # Git ignore rules
+├── global_vars              # ⭐ Runtime configuration (LOGGING, PERFMON, VERBOSE, DEBUG)
+└── CLAUDE.md                # This file
 ```
 
 ### External Data Structure (ROOT_AILH)
@@ -278,36 +294,47 @@ os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 
 ### AI_DEV/ Scripts
 
-#### Core Processing
-- **`dataset_processor.py`**: Mel spectrogram computation, data preprocessing
+The core development scripts (6 Python files):
+
+- **`global_config.py`**: Global configuration (paths, hyperparameters, environment variables)
 - **`ai_builder.py`**: Optimized GPU-accelerated processing pipeline (5-20x speedup)
-
-#### Training
-- **`dataset_trainer.py`**: General dataset training utilities
-
-#### Tuning
-- **`cnn_mel_tuner.py`**: Hyperparameter tuning (Keras Tuner / Optuna)
-
-#### Classification
-- **`dataset_classifier.py`**: Batch classification utilities
-
-#### Incremental Learning
-- **`dataset_learner.py`**: Dataset-based incremental learning
-
-#### Dataset Management
-- **`dataset_builder.py`**: Build and organize datasets
+- **`dataset_builder.py`**: Build and organize datasets from raw audio files
+- **`dataset_classifier.py`**: Batch classification utilities for acoustic signals
+- **`dataset_trainer.py`**: General dataset training utilities for CNN models
+- **`dataset_tuner.py`**: Hyperparameter tuning using Keras Tuner or Optuna
 
 ### UTILITIES/ Scripts
 
-- **`test_gpu_cuda.py`**: Comprehensive GPU/CUDA diagnostics
-- **`test_disk_tune.py`**: Disk I/O performance tuning (24,801 files/s achieved)
-- **`normalize_wav_files.py`**: WAV file normalization
-- **`shuffle_data_for_training.py`**: Dataset shuffling for training/validation
-- **`test_wav_files.py`**: WAV file validation
-- **`test_wav_files_v2.py`**: Enhanced WAV validation
-- **`gen_requirements.py`**: Generate requirements.txt
+Utility and testing scripts (17 Python files):
+
+#### Testing & Validation
+- **`test_gpu_cuda.py`**: Comprehensive GPU/CUDA diagnostics and benchmarking
+- **`test_disk_tune.py`**: Disk I/O performance tuning (achieved: 24,801 files/s)
+- **`test_gpu_monitoring.py`**: Real-time GPU resource monitoring
+- **`test_wav_files.py`**: WAV file validation and integrity checking
+- **`test_wav_files_v2.py`**: Enhanced WAV validation with detailed analysis
+
+#### Data Processing
+- **`normalize_wav_files.py`**: WAV file normalization and preprocessing
+- **`shuffle_data_for_training.py`**: Dataset shuffling for training/validation splits
+- **`dataconv.py`**: Data format conversion utilities
+- **`dataframe.py`**: DataFrame manipulation and analysis tools
+- **`process_acoustic_data.py`**: Acoustic signal processing utilities
+
+#### Synthetic Data & Visualization
+- **`synthetic_data.py`**: Generate synthetic acoustic signals for testing
+- **`synthetic_leakgen.py`**: Generate synthetic leak signatures
+- **`wav_viewer.py`**: Interactive WAV file viewer and analyzer
+- **`leak_annotated_comparison_overlay.py`**: Overlay leak annotations on spectrograms
+- **`leak_example.py`**: Example scripts for leak detection workflows
+
+#### System Utilities
+- **`gen_requirements.py`**: Automatically generate requirements.txt from imports
+- **`prepmp3towav.py`**: Convert MP3 files to WAV format for processing
 
 ### FCS_TOOLS/ Scripts
+
+Field Control System integration (2 Python files):
 
 - **`datagate_client.py`**: Credential rotation client for secure data access
 - **`datagate_sync.py`**: Synchronize sensor data from field control systems
@@ -542,8 +569,8 @@ python UTILITIES/shuffle_data_for_training.py --input MASTER_DATASET --output-tr
 - **DOCS/AILH.md**: Core requirements and specifications
 - **DOCS/OPTIMIZATION_GUIDE.md**: GPU and performance optimization
 - **DOCS/LeakDetectionTwoStageSegmentation.pdf**: Research paper
-- **global_config.py**: Configuration reference
-- **global_vars**: Global Configuration Variables
+- **AI_DEV/global_config.py**: Configuration reference (paths, hyperparameters)
+- **global_vars** (repository root): Runtime configuration (LOGGING, PERFMON, VERBOSE, DEBUG)
 
 ### External References
 - TensorFlow Documentation: https://www.tensorflow.org/
