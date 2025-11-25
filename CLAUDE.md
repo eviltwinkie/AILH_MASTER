@@ -338,7 +338,75 @@ All scripts MUST support the below global variables:
 - **Error handling**: Robust exception handling and logging
 - **Performance Monitoring**: Always time functions for debugging, add CPU/RAM GPU/VRAM DISK_IO/DISK_READ/DISK_WRITE utilization over time and as summary output
 
-#### 8. Professional Reporting Requirements
+#### 8. Version Control and Revision Numbers
+
+**CRITICAL**: All Python files and documentation MUST include version headers.
+
+**Python File Header Format:**
+```python
+#!/usr/bin/env python3
+"""
+Module Name
+Brief description
+
+Version: X.Y.Z
+Revision: N
+Date: YYYY-MM-DD
+Status: Production|Development|Deprecated
+"""
+```
+
+**Version Numbering (Semantic Versioning):**
+- **Major.Minor.Patch** (e.g., 3.0.0)
+- **Major**: Breaking changes, major feature additions
+- **Minor**: New features, backward compatible
+- **Patch**: Bug fixes, minor improvements
+
+**Revision Numbering:**
+- **Revision**: Integer counter (1, 2, 3, ...)
+- **ALWAYS increment** on ANY code change
+- Reset to 1 when version number changes
+
+**When to Update:**
+- ✅ **ANY code modification**: Increment revision
+- ✅ **Bug fixes**: Increment revision
+- ✅ **Feature additions**: Increment revision AND version
+- ✅ **Documentation changes in file**: Increment revision
+- ❌ **External documentation only**: No revision change needed
+
+**Examples:**
+```python
+# Initial release
+Version: 3.0.0
+Revision: 1
+
+# Bug fix (same version, new revision)
+Version: 3.0.0
+Revision: 2
+
+# New feature (new version, reset revision)
+Version: 3.1.0
+Revision: 1
+
+# Breaking change (new major version, reset revision)
+Version: 4.0.0
+Revision: 1
+```
+
+**Markdown File Header Format (README.md, etc.):**
+```markdown
+**Version:** X.Y.Z
+**Revision:** N
+**Status:** ✅ PRODUCTION READY | 🚧 IN DEVELOPMENT
+**Date:** YYYY-MM-DD HH:MM UTC
+```
+
+**Commit Message Format:**
+- Include version/revision in commit messages for releases
+- Example: `"feat: Add feature X (v3.1.0-r1)"`
+- Example: `"fix: Bug fix Y (v3.0.0-r2)"`
+
+#### 9. Professional Reporting Requirements
 
 All analysis outputs and reports MUST include:
 
@@ -749,7 +817,15 @@ Enhance Signal-to-Noise Ratio (SNR) by coherently averaging multiple recordings 
 - **DO** generate JSON output for data files
 - **DO** create both PNG and SVG (with flag) for plots
 
-#### 5. Performance Considerations
+#### 5. Version Control Requirements
+- **DO** add version headers to ALL new Python files
+- **DO** increment revision number on EVERY code change
+- **DO** update version number for new features or breaking changes
+- **DO** include version info in file docstrings (see Development Guidelines section 8)
+- **DO** maintain version/revision history in commit messages
+- **DON'T** skip revision updates - even for minor changes
+
+#### 6. Performance Considerations
 - **DO** use CPU acceleration when possible
 - **DO** use GPU acceleration when possible
 - **DO** use RAM acceleration when possible
@@ -758,31 +834,38 @@ Enhance Signal-to-Noise Ratio (SNR) by coherently averaging multiple recordings 
 - **DO** use parallel processing
 - **DO** use memory-mapped files for large datasets
 
-
-#### 6. Testing Workflow
+#### 7. Testing Workflow
 ```bash
 # Before committing changes:
 1. Test with DATASET_DEV (not production data)
 2. Run test_gpu_cuda.py to verify GPU functionality
 3. Validate WAV files with test_wav_files.py
 4. Check performance impact
-5. Document changes in commit message
+5. Update revision number in file header
+6. Document changes in commit message with version/revision
 ```
 
-#### 7. Common Pitfalls to Avoid
+#### 8. Common Pitfalls to Avoid
 - ❌ Hardcoding paths (use `global_config.py` constants)
 - ❌ Ignoring file naming convention
 - ❌ Modifying production datasets during testing
 - ❌ Not handling OOM errors gracefully
 - ❌ Forgetting `--verbose` and `--debug` flags
+- ❌ Forgetting to increment revision numbers on code changes
+- ❌ Omitting version headers in new files
 
-#### 8. When Adding New Scripts
+#### 9. When Adding New Scripts
 Create scripts that follow this template pattern:
 
 ```python
 #!/usr/bin/env python3
 """
 Script Description
+
+Version: 1.0.0
+Revision: 1
+Date: YYYY-MM-DD
+Status: Development
 
 Usage:
     python script_name.py --input INPUT --output OUTPUT [--verbose] [--debug]
