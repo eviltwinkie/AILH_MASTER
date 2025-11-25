@@ -158,10 +158,8 @@ sensor_id~recording_id~timestamp~gain_db.wav
 
 #### 3. Command-Line Interface
 All scripts MUST support:
-- `--verbose`: Print information during processing steps
-- `--debug`: Print detailed debugging information
-- Command-line configuration for all parameters
-- `--svg`: Generate reactive SVG files (in addition to PNG)
+- `--verbose` and VERBOSE=YES: Print information during processing steps
+- `--debug` and DEBUG=YES: Print detailed debugging information
 
 #### 4. Output Formats
 - **Data files**: JSON format
@@ -274,30 +272,23 @@ os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 ### AI_DEV/ Scripts
 
 #### Core Processing
-- **`cnn_mel_processor.py`**: Mel spectrogram computation, data preprocessing
-- **`pipeline.py`**: Optimized GPU-accelerated processing pipeline (5-20x speedup)
+- **`dataset_processor.py`**: Mel spectrogram computation, data preprocessing
+- **`ai_builder.py`**: Optimized GPU-accelerated processing pipeline (5-20x speedup)
 
 #### Training
-- **`cnn_mel_trainer.py`**: CNN model training with mel spectrograms
 - **`dataset_trainer.py`**: General dataset training utilities
-- **`leak_dataset_trainer_v15.py`**: Legacy v15 training implementation
 
 #### Tuning
 - **`cnn_mel_tuner.py`**: Hyperparameter tuning (Keras Tuner / Optuna)
 
 #### Classification
-- **`cnn_mel_classifier.py`**: Classify audio files using trained models
 - **`dataset_classifier.py`**: Batch classification utilities
-- **`leak_directory_classifier.py`**: Classify entire directories
 
 #### Incremental Learning
-- **`cnn_mel_learner.py`**: Incremental learning with confidence thresholds
 - **`dataset_learner.py`**: Dataset-based incremental learning
-- **`leak_dataset_learner.py`**: Legacy learner implementation
 
 #### Dataset Management
 - **`dataset_builder.py`**: Build and organize datasets
-- **`leak_dataset_builder_v15.py`**: Legacy v15 dataset builder
 
 ### UTILITIES/ Scripts
 

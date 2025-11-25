@@ -1,0 +1,4 @@
+LOGGING=YES # Print information during processing steps
+PERFMON=NO # Print detailed debugging information
+VERBOSE=NO # Print information during processing steps
+DEBUG=NO # Print detailed debugging information
