@@ -56,6 +56,10 @@ class BayesianEstimator:
         if std_m is None:
             std_m = BAYESIAN_PRIOR_STD_M
 
+        # Validate inputs
+        if sensor_separation_m <= 0:
+            raise ValueError(f"Sensor separation must be positive, got {sensor_separation_m}")
+
         # Position grid
         positions = np.arange(0, sensor_separation_m + BAYESIAN_GRID_RESOLUTION_M,
                               BAYESIAN_GRID_RESOLUTION_M)
@@ -104,6 +108,12 @@ class BayesianEstimator:
         """
         if beta is None:
             beta = BAYESIAN_LIKELIHOOD_BETA
+
+        # Validate inputs
+        if sensor_separation_m <= 0:
+            raise ValueError(f"Sensor separation must be positive, got {sensor_separation_m}")
+        if wave_speed_mps <= 0:
+            raise ValueError(f"Wave speed must be positive, got {wave_speed_mps}")
 
         # Position grid
         positions = np.arange(0, sensor_separation_m + BAYESIAN_GRID_RESOLUTION_M,

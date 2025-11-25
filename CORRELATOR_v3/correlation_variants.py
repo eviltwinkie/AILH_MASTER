@@ -18,6 +18,14 @@ except ImportError:
 from correlator_v3_config import *
 
 
+def _validate_signals(signal_a: np.ndarray, signal_b: np.ndarray) -> None:
+    """Validate input signals for correlation"""
+    if len(signal_a) == 0 or len(signal_b) == 0:
+        raise ValueError("Input signals cannot be empty")
+    if len(signal_a) != len(signal_b):
+        raise ValueError(f"Signal length mismatch: {len(signal_a)} vs {len(signal_b)}")
+
+
 def gcc_phat(signal_a: np.ndarray, signal_b: np.ndarray,
              sample_rate: int = 4096, use_gpu: bool = True) -> np.ndarray:
     """
@@ -25,6 +33,8 @@ def gcc_phat(signal_a: np.ndarray, signal_b: np.ndarray,
     W(f) = 1 / |X(f)Y*(f)|
     Robust to reverberation.
     """
+    _validate_signals(signal_a, signal_b)
+
     if use_gpu and GPU_AVAILABLE:
         sig_a = cp.asarray(signal_a, dtype=cp.float32)
         sig_b = cp.asarray(signal_b, dtype=cp.float32)
@@ -63,6 +73,8 @@ def gcc_roth(signal_a: np.ndarray, signal_b: np.ndarray,
     W(f) = 1 / |X(f)|²
     Good for colored noise.
     """
+    _validate_signals(signal_a, signal_b)
+
     if use_gpu and GPU_AVAILABLE:
         sig_a = cp.asarray(signal_a, dtype=cp.float32)
         sig_b = cp.asarray(signal_b, dtype=cp.float32)
@@ -98,6 +110,8 @@ def gcc_scot(signal_a: np.ndarray, signal_b: np.ndarray,
     W(f) = 1 / sqrt(|X(f)|² · |Y(f)|²)
     Robust to reverberant environments.
     """
+    _validate_signals(signal_a, signal_b)
+
     if use_gpu and GPU_AVAILABLE:
         sig_a = cp.asarray(signal_a, dtype=cp.float32)
         sig_b = cp.asarray(signal_b, dtype=cp.float32)
@@ -131,6 +145,8 @@ def classical_correlation(signal_a: np.ndarray, signal_b: np.ndarray,
     """
     Unweighted time-domain cross-correlation.
     """
+    _validate_signals(signal_a, signal_b)
+
     if use_gpu and GPU_AVAILABLE:
         sig_a = cp.asarray(signal_a, dtype=cp.float32)
         sig_b = cp.asarray(signal_b, dtype=cp.float32)
@@ -152,6 +168,10 @@ def wavelet_correlation(signal_a: np.ndarray, signal_b: np.ndarray,
     Multi-resolution wavelet-based correlation.
     Performs correlation at multiple wavelet decomposition levels.
     """
+    # Validate signals (allow different lengths for wavelet)
+    if len(signal_a) == 0 or len(signal_b) == 0:
+        raise ValueError("Input signals cannot be empty")
+
     # Wavelet decomposition
     coeffs_a = pywt.wavedec(signal_a, wavelet, level=levels)
     coeffs_b = pywt.wavedec(signal_b, wavelet, level=levels)
@@ -207,6 +227,10 @@ def fuse_correlations(
     - 'best_snr': Select method with highest SNR (peak-to-noise ratio)
     - 'majority_vote': Vote on peak location
     """
+    # Validate inputs
+    if not correlations or len(correlations) == 0:
+        raise ValueError("Cannot fuse empty correlations dictionary")
+
     if method == 'weighted_average':
         if weights is None:
             # Equal weights

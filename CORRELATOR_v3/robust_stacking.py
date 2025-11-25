@@ -29,6 +29,10 @@ def weighted_trimmed_mean(
     if trim_percentile is None:
         trim_percentile = TRIMMED_MEAN_PERCENTILE
 
+    # Validate inputs
+    if not (0 <= trim_percentile < 0.5):
+        raise ValueError(f"Trim percentile must be in [0, 0.5), got {trim_percentile}")
+
     if weights is None:
         weights = np.ones(correlations.shape[0])
 
@@ -40,6 +44,13 @@ def weighted_trimmed_mean(
     result = np.zeros(n_samples)
 
     n_trim = int(n_corr * trim_percentile)
+
+    # Ensure at least one value remains after trimming
+    if 2 * n_trim >= n_corr:
+        raise ValueError(
+            f"Trimming {n_trim} from each end removes all {n_corr} correlations. "
+            f"Reduce trim_percentile or increase number of correlations."
+        )
 
     for i in range(n_samples):
         values = correlations[:, i]
@@ -221,6 +232,14 @@ def adaptive_stacking(
     """
     if method is None:
         method = ROBUST_STACKING_METHOD
+
+    # Validate inputs
+    if correlations.size == 0:
+        raise ValueError("Correlations array cannot be empty")
+    if correlations.ndim != 2:
+        raise ValueError(f"Correlations must be 2D array, got {correlations.ndim}D")
+    if correlations.shape[0] == 0 or correlations.shape[1] == 0:
+        raise ValueError(f"Invalid correlations shape: {correlations.shape}")
 
     if method == 'mean':
         if weights is not None:

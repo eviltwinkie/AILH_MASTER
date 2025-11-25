@@ -87,6 +87,8 @@ class PhysicsAwareCorrelator:
     def position_to_delay(self, position_m: float, velocity_mps: float,
                           sensor_separation_m: float) -> float:
         """Convert leak position to expected time delay"""
+        if velocity_mps <= 0:
+            raise ValueError(f"Wave speed must be positive, got {velocity_mps}")
         return (sensor_separation_m - 2 * position_m) / velocity_mps
 
     def joint_search(
@@ -109,6 +111,14 @@ class PhysicsAwareCorrelator:
             position_resolution_m = POSITION_SEARCH_RESOLUTION_M
         if velocity_resolution_mps is None:
             velocity_resolution_mps = VELOCITY_SEARCH_STEP_MPS
+
+        # Validate inputs
+        if sensor_separation_m <= 0:
+            raise ValueError(f"Sensor separation must be positive, got {sensor_separation_m}")
+        if velocity_range[0] <= 0 or velocity_range[1] <= 0:
+            raise ValueError(f"Wave speed must be positive, got range {velocity_range}")
+        if velocity_range[0] >= velocity_range[1]:
+            raise ValueError(f"Invalid velocity range: min ({velocity_range[0]}) >= max ({velocity_range[1]})")
 
         if self.verbose:
             print(f"\n[i] Joint (x,c) search:")

@@ -86,6 +86,14 @@ class AIWindowGating:
         window_samples = int(self.window_size_sec * sample_rate)
         step_samples = int(window_samples * (1 - overlap))
 
+        # Validate signal length
+        if len(signal) < window_samples:
+            raise ValueError(
+                f"Signal too short for window size: "
+                f"signal={len(signal)} samples ({len(signal)/sample_rate:.2f}s), "
+                f"window={window_samples} samples ({self.window_size_sec}s)"
+            )
+
         windows = []
         for start in range(0, len(signal) - window_samples + 1, step_samples):
             end = start + window_samples
@@ -165,8 +173,15 @@ class AIWindowGating:
             snr_norm = (snr_values - np.min(snr_values)) / (np.max(snr_values) - np.min(snr_values) + 1e-12)
             weights *= snr_norm ** snr_exp
 
+        # Check for all-zero weights (fallback to uniform)
+        weight_sum = np.sum(weights)
+        if weight_sum < 1e-10:
+            # All weights are effectively zero, use uniform weights
+            weights = np.ones(len(weights))
+            weight_sum = np.sum(weights)
+
         # Normalize weights
-        weights /= (np.sum(weights) + 1e-12)
+        weights /= weight_sum
 
         return weights
 

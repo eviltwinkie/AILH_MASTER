@@ -226,6 +226,12 @@ Examples:
         print(f"\n[3/5] Multi-Method Correlation...")
 
     methods = args.correlation_methods.split(',')
+    # Validate methods list
+    methods = [m.strip() for m in methods if m.strip()]  # Remove empty strings
+    if not methods:
+        print(f"[✗] Error: No correlation methods specified")
+        sys.exit(1)
+
     correlator = MultiMethodCorrelator(methods=methods, verbose=verbose)
     correlations = correlator.correlate(signal_a, signal_b, sample_rate)
 
