@@ -293,7 +293,7 @@ for directory in [DEFAULT_OUTPUT_DIR, CORRELATION_CACHE_DIR, CORRELATION_LOG_DIR
 EXPECTED_SAMPLE_RATE = SAMPLE_RATE  # 4096 Hz from global_config
 
 # Expected duration (must match AILH system)
-EXPECTED_DURATION_SEC = SAMPLE_LENGTH_SEC  # 10 seconds from global_config
+EXPECTED_DURATION_SEC = SAMPLE_DURATION  # 10 seconds from global_config
 
 # Expected file naming delimiter
 EXPECTED_DELIMITER = DELIMITER  # '~' from global_config
@@ -549,7 +549,7 @@ if __name__ == '__main__':
 
         print(f"\n[i] Root Directory: {ROOT_DIR}")
         print(f"[i] Sample Rate: {SAMPLE_RATE} Hz")
-        print(f"[i] Recording Duration: {SAMPLE_LENGTH_SEC} seconds")
+        print(f"[i] Recording Duration: {SAMPLE_DURATION} seconds")
         print(f"\n[i] Correlation Method: {DEFAULT_CORRELATION_METHOD}")
         print(f"[i] Default Pipe Material: {DEFAULT_PIPE_MATERIAL}")
         print(f"[i] Default Wave Speed: {DEFAULT_WAVE_SPEED} m/s")
