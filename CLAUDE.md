@@ -189,9 +189,9 @@ All scripts MUST support the below global variables:
 
 ### Classification Categories
 
-**CRITICAL**: Active label set:
+**CRITICAL**: Official label set:
 
-DATA_LABELS = ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED']
+DATA_LABELS = ['BACKGROUND', 'CRACK', 'LEAK', 'NORMAL', 'UNCLASSIFIED']
 
 ### Dataset Split
 - **MASTER_DATASET**: 100% - Source of truth (manually labeled)
