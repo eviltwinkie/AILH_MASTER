@@ -71,28 +71,24 @@ The system uses hydrophone sensors to capture acoustic signals from water pipeli
 ```
 AILH_MASTER/
 ├── AI_DEV/                  # Main development scripts
-│   ├── cnn_mel_classifier.py
-│   ├── cnn_mel_learner.py
-│   ├── cnn_mel_processor.py
-│   ├── cnn_mel_trainer.py
-│   ├── cnn_mel_tuner.py
+│   ├── global_config.py         # Global configuration
 │   ├── dataset_builder.py
 │   ├── dataset_classifier.py
-│   ├── dataset_learner.py
 │   ├── dataset_trainer.py
-│   ├── leak_dataset_builder_v15.py
-│   ├── leak_dataset_learner.py
-│   ├── leak_dataset_trainer_v15.py
-│   ├── leak_directory_classifier.py
-│   └── pipeline.py         # Optimized GPU pipeline
+│   ├── dataset_tuner.py
+│   └── ai_builder.py        
+│
+├── CORRELATOR_V2/                    # 
+│   └── ...             # Correlator v2.0 source code
 │
 ├── DOCS/                    # Documentation
 │   ├── AILH.md             # Core requirements & specifications
-│   ├── OPTIMIZATION_GUIDE.md
-│   ├── test_disk_tune_results.json
-│   ├── test_disk_tune_results.txt
-│   ├── test_gpu_cuda_results.txt
-│   └── LeakDetectionTwoStageSegmentation.pdf
+│   ├── ... # All other misc information for loose project guidance 
+│   ├── OPTIMIZATION_GUIDE.md # Misc information
+│   ├── test_disk_tune_results.json # Local system hard drive performance test results/settings
+│   ├── test_disk_tune_results.txt # Local system hard drive performance test results/settings
+│   ├── test_gpu_cuda_results.txt # Local system GPU/CUDA and support/hardware information
+│   └── LeakDetectionTwoStageSegmentation.pdf # Reference information for project guidelines
 │
 ├── FCS_TOOLS/               # Field Control System tools
 │   ├── datagate_client.py   # Credential rotation client
@@ -100,6 +96,7 @@ AILH_MASTER/
 │
 ├── UTILITIES/               # Utility scripts
 │   ├── gen_requirements.py
+│   ├── ... # Other misc utilities
 │   ├── normalize_wav_files.py
 │   ├── shuffle_data_for_training.py
 │   ├── test_disk_tune.py
@@ -107,7 +104,6 @@ AILH_MASTER/
 │   ├── test_wav_files.py
 │   └── test_wav_files_v2.py
 │
-├── global_config.py         # Global configuration
 └── CLAUDE.md               # This file
 ```
 
@@ -155,10 +151,10 @@ sensor_id~recording_id~timestamp~gain_db.wav
 - Gain range: 0-200dB (1dB indicates hydrophone not touching water)
 
 #### 2. Data Specifications
-- **Sample Rate**: 4096 Hz (REQUIRED to upscale to 8192 Hz)
+- **Sample Rate**: 4096 Hz
+- **Sample Upscale Rate**: 8192 Hz
 - **Sample Duration**: 10 seconds
-- **File Format**: WAV (normalized, but verify)
-- **Default Dataset Size**: 4096 10-second WAV files
+- **Sample File Format**: WAV
 
 #### 3. Command-Line Interface
 All scripts MUST support:
@@ -174,12 +170,12 @@ All scripts MUST support:
 
 #### 5. Code Quality
 - **Document all code** with docstrings and comments
-- **Optimize for performance**: Use multiprocessing/multithreading
+- **Optimize for performance**: Use multiprocessing/multithreading where it makes performance sense, vector where possible, use RAM where possible/available
 - **Error handling**: Robust exception handling and logging
 - **Memory efficiency**: Use memory-mapped files for large datasets
 
 #### 6. Library Restrictions
-- **DO NOT use librosa** - Use numpy, matplotlib, scipy instead
+- **Prefer DO NOT use librosa** - Use numpy, matplotlib, scipy instead
 - **Prefer**: numpy, scipy, matplotlib, tensorflow, keras, cupy, pyfftw
 
 ---
@@ -229,7 +225,8 @@ DATA_LABELS = ['LEAK', 'NORMAL', 'QUIET', 'RANDOM', 'MECHANICAL', 'UNCLASSIFIED'
 
 #### Audio Processing
 ```python
-SAMPLE_RATE = 4096              # Fixed: 4096 Hz
+SAMPLE_RATE = 4096              # Hz
+SAMPLE_UPSCALE_RATE = 8192              # Hz
 SAMPLE_DURATION = 10.0          # 10 seconds
 LONG_SEGMENTS = [0.125, 0.25, 0.5, 0.75, 1.0]  # seconds
 SHORT_SEGMENTS = [64, 128, 256, 512, 1024]      # points
@@ -507,7 +504,6 @@ AUC = Area Under ROC Curve
 - **DO** support command-line configuration
 - **DO** generate JSON output for data files
 - **DO** create both PNG and SVG (with flag) for plots
-- **DON'T** use librosa (use numpy/scipy instead)
 
 #### 5. Performance Considerations
 - **DO** use GPU acceleration when possible
@@ -528,8 +524,6 @@ AUC = Area Under ROC Curve
 
 #### 7. Common Pitfalls to Avoid
 - ❌ Hardcoding paths (use `global_config.py` constants)
-- ❌ Assuming 6-category label set (verify active set)
-- ❌ Using librosa (use numpy/scipy/matplotlib)
 - ❌ Ignoring file naming convention
 - ❌ Modifying production datasets during testing
 - ❌ Not handling OOM errors gracefully
