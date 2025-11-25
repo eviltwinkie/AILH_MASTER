@@ -178,7 +178,7 @@ All scripts MUST support the below global variables:
 
 #### 7. Code Quality
 - **Document all code**: docstrings and comments
-- **Optimize for performance**: Use multiprocessing/multithreading where it makes performance sense, vector where possible, use RAM where possible/available
+- **Optimize for performance**: Use multiprocessing/multithreading where it makes performance sense, parallel processing, vector where possible, use RAM/VRAM where possible/available
 - **Memory efficiency**: Use memory-mapped files for large datasets
 - **Error handling**: Robust exception handling and logging
 - **Performance Monitoring**: Always time functions for debugging, add CPU/RAM GPU/VRAM DISK_IO/DISK_READ/DISK_WRITE utilization over time and as summary output
@@ -392,7 +392,7 @@ Epochs: 200
 ### When Working on This Codebase
 
 #### 1. Always Verify Configuration
-- **DON'T** assume `global_config.py` values are used everywhere
+- **DON'T** assume `global_config.py` or `global_vars` values are used everywhere
 - **DO** check actual parameter values in the script you're modifying
 - **DO** document any discrepancies you find
 
@@ -415,11 +415,14 @@ Epochs: 200
 - **DO** create both PNG and SVG (with flag) for plots
 
 #### 5. Performance Considerations
+- **DO** use CPU acceleration when possible
 - **DO** use GPU acceleration when possible
-- **DO** implement multiprocessing/multithreading
+- **DO** use RAM acceleration when possible
+- **DO** use VRAM acceleration when possible
+- **DO** use vector acceleration when possible
+- **DO** use parallel processing
 - **DO** use memory-mapped files for large datasets
-- **DO** test with `test_gpu_cuda.py` after GPU code changes
-- **DO** profile disk I/O with `test_disk_tune.py`
+
 
 #### 6. Testing Workflow
 ```bash
