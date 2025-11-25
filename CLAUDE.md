@@ -142,12 +142,10 @@ The actual data is stored outside the repository at `/DEVELOPMENT/ROOT_AILH/`:
 ### Mandatory Requirements
 
 #### 1. File Naming Convention
-**ALL input WAV files MUST follow this nomenclature:**
-```
-sensor_id~recording_id~timestamp~gain_db.wav
-```
-- Delimiter: `~` (tilde)
-- Example: `S001~R123~20250118120530~100.wav`
+- Delimiter: ~ (tilde)
+- ALL input WAV files MUST follow this nomenclature:
+- sensor_id~recording_id~timestamp~gain_db.wav
+- Example: S001~R123~20250118120530~100.wav
 - Gain range: 0-200dB (1dB indicates hydrophone not touching water)
 
 #### 2. Data Specifications
@@ -158,23 +156,32 @@ sensor_id~recording_id~timestamp~gain_db.wav
 
 #### 3. Command-Line Interface
 All scripts MUST support:
-- `--verbose` and VERBOSE=YES: Print information during processing steps
-- `--debug` and DEBUG=YES: Print detailed debugging information
+- `--verbose`: Print information during processing steps
+- `--debug`: Print detailed debugging information
 
-#### 4. Output Formats
+#### 4. Script Verbosity, Logging, Debugging
+All scripts MUST support the below global variables:
+- **LOGGING=YES**: Print information during processing steps
+- **PERFMON=NO**: Print detailed debugging information
+- **VERBOSE=NO**: Print information during processing steps
+- **DEBUG=NO**: Print detailed debugging information
+- **From file**: /global_vars
+
+#### 5. Optional variables
+- **UPSCALE=NO**: Upscale audio data to 8192 Hz
+- `--upscale`: Upscale audio data to 8192 Hz
+
+#### 6. Output Formats
 - **Data files**: JSON format
-- **Graphs/plots**: PNG format (with `--svg` flag for SVG)
+- **Graphs/plots**: PNG format (with --svg flag for (interactive where possible) SVG)
 - **Console reports**: For all end results and debugging
 
-#### 5. Code Quality
-- **Document all code** with docstrings and comments
+#### 7. Code Quality
+- **Document all code**: docstrings and comments
 - **Optimize for performance**: Use multiprocessing/multithreading where it makes performance sense, vector where possible, use RAM where possible/available
-- **Error handling**: Robust exception handling and logging
 - **Memory efficiency**: Use memory-mapped files for large datasets
-
-#### 6. Library Restrictions
-- **Prefer DO NOT use librosa** - Use numpy, matplotlib, scipy instead
-- **Prefer**: numpy, scipy, matplotlib, tensorflow, keras, cupy, pyfftw
+- **Error handling**: Robust exception handling and logging
+- **Performance Monitoring**: Always time functions for debugging, add CPU/RAM GPU/VRAM DISK_IO/DISK_READ/DISK_WRITE utilization over time and as summary output
 
 ---
 
